@@ -19,7 +19,8 @@ import sys
 def check_key(key: str) -> str | None:  # noqa: PLR0911
     """Return an error message if `key` must not be published, else None."""
     if not key:
-        return "Repository variable SUPABASE_PUBLISHABLE_KEY is not set."
+        return ("SUPABASE_PUBLISHABLE_KEY is empty. Add it under Settings > Secrets and variables > Actions > "
+                "Variables (repository level, not inside an environment).")
     if key.startswith("sb_secret_"):
         return "SUPABASE_PUBLISHABLE_KEY holds a SECRET key (sb_secret_...). Use the publishable key."
     if key.startswith("sb_publishable_"):
@@ -38,6 +39,9 @@ def check_key(key: str) -> str | None:  # noqa: PLR0911
 
 
 def check_url(url: str) -> str | None:
+    if not url:
+        return ("SUPABASE_URL is empty. Add it under Settings > Secrets and variables > Actions > Variables "
+                "(repository level, not inside an environment).")
     if not re.fullmatch(r"https://[a-z0-9-]+\.supabase\.co", url or ""):
         return "SUPABASE_URL must look like https://<project-ref>.supabase.co (no trailing path)."
     return None

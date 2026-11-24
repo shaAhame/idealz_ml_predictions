@@ -1,6 +1,7 @@
 # Publishes dashboard/ to GitHub Pages.
 # One-time setup: Settings > Pages > Source = "GitHub Actions", and repository
-# variables (Settings > Secrets and variables > Actions > Variables):
+# variables (Settings > Secrets and variables > Actions > Variables; repository secrets with
+# the same names also work, but NOT ones stored inside an environment such as "production"):
 #   SUPABASE_URL              https://<project-ref>.supabase.co
 #   SUPABASE_PUBLISHABLE_KEY  sb_publishable_...   (NEVER the secret key)
 name: dashboard
@@ -32,8 +33,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Write config.js (publishable key only)
         env:
-          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
-          PUBLISHABLE_KEY: ${{ vars.SUPABASE_PUBLISHABLE_KEY }}
+          # Repository variables preferred; repository secrets accepted too.
+          SUPABASE_URL: ${{ vars.SUPABASE_URL || secrets.SUPABASE_URL }}
+          PUBLISHABLE_KEY: ${{ vars.SUPABASE_PUBLISHABLE_KEY || secrets.SUPABASE_PUBLISHABLE_KEY }}
         run: python3 .github/scripts/write_dashboard_config.py dashboard/config.js
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
