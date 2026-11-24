@@ -12,7 +12,8 @@ A phone-friendly page with your forecast vs actual sales, hosted free on GitHub 
   function, `dashboard_data()`. That function returns data **only** if your email is
   in the `dashboard_viewers` table. Anyone else, even with an account, gets
   "not on the viewer list".
-- The deploy workflow refuses to publish if a secret key is put in the wrong place.
+- The deploy workflow refuses to publish if a secret key is put in the wrong place, and
+  reads only GitHub *secrets*, so a mix-up can't print a key in the public run logs.
 
 ## One-time setup
 
@@ -27,8 +28,9 @@ A phone-friendly page with your forecast vs actual sales, hosted free on GitHub 
    Sign In / Providers** → turn off **Allow new users to sign up**.
 4. **Publishable key:** Supabase → **Project Settings → API Keys** → copy the
    **Publishable key** (`sb_publishable_…`), **not** the secret key.
-5. **GitHub variables:** repo → **Settings → Secrets and variables → Actions →
-   Variables** tab → **New repository variable**:
+5. **GitHub secrets:** repo → **Settings → Secrets and variables → Actions →
+   Secrets** tab → **New repository secret** (secrets, not variables: GitHub hides
+   secrets in its public logs):
    - `SUPABASE_URL` = `https://<project-ref>.supabase.co`
    - `SUPABASE_PUBLISHABLE_KEY` = the publishable key
 6. **Turn on Pages:** repo → **Settings → Pages** → *Build and deployment* → **Source:

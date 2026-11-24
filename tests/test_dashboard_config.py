@@ -50,3 +50,20 @@ def test_cli_writes_config_and_refuses_secret(tmp_path: Path) -> None:
 def test_page_has_no_embedded_keys() -> None:
     html = (ROOT / "dashboard/index.html").read_text()
     assert "sb_secret_" not in html and "sb_publishable_" not in html and "eyJ" not in html
+
+
+def test_push_without_config_skips_cleanly(tmp_path: Path) -> None:
+    out, gh_out = tmp_path / "config.js", tmp_path / "gh_output"
+    env = {"GITHUB_EVENT_NAME": "push", "GITHUB_OUTPUT": str(gh_out), "PATH": ""}
+    r = subprocess.run([sys.executable, str(SCRIPT), str(out)], check=False, env=env, capture_output=True, text=True)
+    assert r.returncode == 0 and "ready=false" in gh_out.read_text() and not out.exists()
+    env["GITHUB_EVENT_NAME"] = "workflow_dispatch"
+    r = subprocess.run([sys.executable, str(SCRIPT), str(out)], check=False, env=env, capture_output=True, text=True)
+    assert r.returncode == 1 and "empty" in r.stdout
+
+
+def test_key_never_printed(tmp_path: Path) -> None:
+    env = {"SUPABASE_URL": "https://abc.supabase.co", "PUBLISHABLE_KEY": "sb_secret_TOPSECRET123", "PATH": ""}
+    r = subprocess.run([sys.executable, str(SCRIPT), str(tmp_path / "c.js")], check=False, env=env,
+                       capture_output=True, text=True)
+    assert "TOPSECRET123" not in r.stdout + r.stderr

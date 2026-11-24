@@ -1,9 +1,10 @@
 # Publishes dashboard/ to GitHub Pages.
-# One-time setup: Settings > Pages > Source = "GitHub Actions", and repository
-# variables (Settings > Secrets and variables > Actions > Variables; repository secrets with
-# the same names also work, but NOT ones stored inside an environment such as "production"):
+# One-time setup: Settings > Pages > Source = "GitHub Actions", and two REPOSITORY SECRETS
+# (Settings > Secrets and variables > Actions > Secrets; not inside an environment):
 #   SUPABASE_URL              https://<project-ref>.supabase.co
 #   SUPABASE_PUBLISHABLE_KEY  sb_publishable_...   (NEVER the secret key)
+# Secrets, not variables: GitHub masks secrets in the public run logs, so even a
+# mis-pasted secret key can never be printed there.
 name: dashboard
 
 on:
@@ -23,8 +24,6 @@ concurrency:
 
 jobs:
   deploy:
-    # Skip quietly on push until the dashboard is configured; a manual run always tries (and explains what's missing).
-    if: vars.SUPABASE_PUBLISHABLE_KEY != '' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
@@ -32,14 +31,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Write config.js (publishable key only)
+        id: cfg
         env:
-          # Repository variables preferred; repository secrets accepted too.
-          SUPABASE_URL: ${{ vars.SUPABASE_URL || secrets.SUPABASE_URL }}
-          PUBLISHABLE_KEY: ${{ vars.SUPABASE_PUBLISHABLE_KEY || secrets.SUPABASE_PUBLISHABLE_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
         run: python3 .github/scripts/write_dashboard_config.py dashboard/config.js
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
+      - if: steps.cfg.outputs.ready == 'true'
+        uses: actions/configure-pages@v5
+      - if: steps.cfg.outputs.ready == 'true'
+        uses: actions/upload-pages-artifact@v3
         with:
           path: dashboard
-      - id: deployment
+      - if: steps.cfg.outputs.ready == 'true'
+        id: deployment
         uses: actions/deploy-pages@v4
