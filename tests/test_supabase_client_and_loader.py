@@ -81,10 +81,11 @@ def test_csv_cleaning(tmp_path: Path) -> None:
         "2026-07-02,ISEVEN,ACCESSORIES,,Z,A,100,50,50\n"
     )
     tx = load_transactions_csv(p)
-    assert len(tx) == 2
-    assert tx["revenue"].tolist() == [10000.0, 3000.0]
-    assert tx["cost"].tolist() == [7500.0, -200.0]
-    assert (tx["sale_date"] == pd.Timestamp("2026-07-01")).all()
+    assert len(tx) == 3  # missing date dropped; missing Bill No. is allowed
+    assert tx["revenue"].tolist() == [10000.0, 3000.0, 100.0]
+    assert tx["cost"].tolist() == [7500.0, -200.0, 50.0]
+    assert tx["sale_date"].tolist() == [pd.Timestamp("2026-07-01")] * 2 + [pd.Timestamp("2026-07-02")]
+    assert tx["bill_no"].isna().tolist() == [False, False, True]
     assert set(tx["location"]) == {"ISEVEN"} and set(tx["category"]) == {"ACCESSORIES"}
 
 

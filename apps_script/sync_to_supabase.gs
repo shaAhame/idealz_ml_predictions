@@ -52,7 +52,8 @@ var COLUMN_MAP = {
   // "Profit" is intentionally not synced: the DB computes profit = revenue - cost.
 };
 
-var REQUIRED_FIELDS = ['sale_date', 'location', 'category', 'bill_no', 'revenue'];
+// Bill No. is optional: some sales lines have no bill number, and their revenue still counts.
+var REQUIRED_FIELDS = ['sale_date', 'location', 'category', 'revenue'];
 var UPPERCASE_FIELDS = ['location', 'category'];  // normalised so series keys are stable
 var NUMERIC_FIELDS = ['revenue', 'cost'];
 
@@ -206,7 +207,7 @@ function processSheet_(sheet, cfg, mode, started, seenSet) {
   var colIndex = resolveColumns_(headers, name);
   var values = sheet.getRange(cfg.headerRow + 1, 1, n, lastCol).getValues();
   var fingerprint = fingerprint_(values, colIndex);
-  var tz = SpreadsheetApp.getActive().getSpreadsheetTimeZone();
+  var tz = sheetTimeZone_();
 
   var ids = new Array(n);
   var hashes = new Array(n);
@@ -381,6 +382,24 @@ function toIsoDate_(v, tz, order) {
     throw new Error('impossible calendar date');
   }
   return checkYear_(y + '-' + pad2_(m) + '-' + pad2_(d));
+}
+
+/**
+ * Time zone used to turn date cells into calendar dates. getSpreadsheetTimeZone()
+ * can return an empty/non-string value for some files (e.g. converted from Excel),
+ * so validate it and fall back to the script's time zone, then Asia/Colombo.
+ */
+function sheetTimeZone_() {
+  var candidates = [];
+  try { candidates.push(SpreadsheetApp.getActive().getSpreadsheetTimeZone()); } catch (e) {}
+  try { candidates.push(Session.getScriptTimeZone()); } catch (e) {}
+  candidates.push('Asia/Colombo');
+  for (var i = 0; i < candidates.length; i++) {
+    var tz = candidates[i] ? String(candidates[i]) : '';
+    if (!tz) continue;
+    try { Utilities.formatDate(new Date(), tz, 'yyyy'); return tz; } catch (e) {}
+  }
+  return 'UTC';
 }
 
 function checkYear_(iso) {

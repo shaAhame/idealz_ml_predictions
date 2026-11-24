@@ -21,6 +21,12 @@ do $$ begin
   assert (select updated_at = '2000-01-01'::timestamptz from sales_transactions where row_id='r1'), 'unchanged hash must not bump updated_at';
 end $$;
 
+-- 1b. Bill No. is optional
+insert into sales_transactions (row_id, sale_date, location, category, bill_no, revenue, row_hash)
+values ('r0','2026-06-30','ISEVEN','ACCESSORIES',null,500,'h0');
+do $$ begin assert (select bills from v_daily_sales where sale_date='2026-06-30') = 0; end $$;
+delete from sales_transactions where row_id='r0';
+
 -- 2. Changed content bumps updated_at
 insert into sales_transactions (row_id, sale_date, location, category, bill_no, revenue, cost, row_hash)
 values ('r1','2026-07-01','ISEVEN','ACCESSORIES','1604',11000,7500,'h1b')

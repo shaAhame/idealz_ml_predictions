@@ -74,7 +74,7 @@ create table if not exists public.sales_transactions (
   sale_date     date        not null,
   location      text        not null,
   category      text        not null,
-  bill_no       text        not null,
+  bill_no       text,                       -- optional: some sheet lines have no bill number
   imei          text,                       -- text: preserves leading zeros / multiple IMEIs
   item          text,                       -- sheet: "Brand/Item"
   model         text,
@@ -92,12 +92,18 @@ create table if not exists public.sales_transactions (
   constraint sales_transactions_row_id_key unique (row_id),
   constraint sales_transactions_location_nonempty check (btrim(location) <> ''),
   constraint sales_transactions_category_nonempty check (btrim(category) <> ''),
-  constraint sales_transactions_bill_nonempty check (btrim(bill_no) <> '')
+  constraint sales_transactions_bill_nonempty check (bill_no is null or btrim(bill_no) <> '')
 );
 
 comment on table  public.sales_transactions is 'One row per sales line item, synced idempotently from Google Sheets.';
 comment on column public.sales_transactions.row_id is 'UUID stored in the sheet''s hidden _row_id column; upsert conflict target.';
 comment on column public.sales_transactions.profit is 'Generated: revenue - cost. NULL when cost is unknown.';
+
+-- Upgrade path for databases created before Bill No. became optional (idempotent).
+alter table public.sales_transactions alter column bill_no drop not null;
+alter table public.sales_transactions drop constraint if exists sales_transactions_bill_nonempty;
+alter table public.sales_transactions
+  add constraint sales_transactions_bill_nonempty check (bill_no is null or btrim(bill_no) <> '');
 
 create index if not exists idx_sales_tx_sale_date        on public.sales_transactions (sale_date);
 create index if not exists idx_sales_tx_series_date      on public.sales_transactions (location, category, sale_date)

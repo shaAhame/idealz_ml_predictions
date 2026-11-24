@@ -155,7 +155,7 @@ def load_transactions_csv(path: Path) -> pd.DataFrame:
     raw = pd.read_csv(path, dtype=str, keep_default_na=False)
     cols = {c: SHEET_HEADER_MAP.get(_norm_header(c), _norm_header(c).replace(" ", "_")) for c in raw.columns}
     tx = raw.rename(columns=cols)
-    missing = {"sale_date", "location", "category", "bill_no", "revenue"} - set(tx.columns)
+    missing = {"sale_date", "location", "category", "revenue"} - set(tx.columns)
     if missing:
         raise DataError(f"CSV {path} is missing columns: {sorted(missing)}")
 
@@ -164,10 +164,11 @@ def load_transactions_csv(path: Path) -> pd.DataFrame:
     tx["cost"] = _to_number(tx["cost"]) if "cost" in tx else np.nan
     for c in ("location", "category"):
         tx[c] = tx[c].astype("string").str.replace(r"\s+", " ", regex=True).str.strip().str.upper()
-    tx["bill_no"] = tx["bill_no"].astype("string").str.strip()
+    tx["bill_no"] = (tx["bill_no"].astype("string").str.strip().replace("", pd.NA) if "bill_no" in tx
+                     else pd.Series(pd.NA, index=tx.index, dtype="string"))  # optional
 
     valid = (tx["sale_date"].notna() & tx["revenue"].notna()
-             & tx["location"].fillna("").ne("") & tx["category"].fillna("").ne("") & tx["bill_no"].fillna("").ne(""))
+             & tx["location"].fillna("").ne("") & tx["category"].fillna("").ne(""))
     if (~valid).any():
         log.warning("dropping invalid csv rows", extra={"invalid_rows": int((~valid).sum())})
     if "deleted_at" in tx:

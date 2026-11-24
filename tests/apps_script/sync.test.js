@@ -99,13 +99,18 @@ function makeContext(ss, db, props) {
     console: { log: m => logs.push(m), warn: m => logs.push('WARN ' + m), error: m => logs.push('ERR ' + m) },
     SpreadsheetApp: { getActive: () => ss, flush: () => {}, getUi: () => ({}) },
     PropertiesService: { getScriptProperties: () => ({ getProperty: k => (k in props ? props[k] : null) }) },
+    Session: { getScriptTimeZone: () => (props.__scriptTz === undefined ? 'Asia/Colombo' : props.__scriptTz) },
     LockService: { getScriptLock: () => ({ tryLock: () => true, releaseLock: () => {} }) },
     UrlFetchApp: { fetch: (url, opts) => db.handle(url, opts) },
     ScriptApp: {},
     Utilities: {
       getUuid: () => crypto.randomUUID(),
       sleep: () => {},
-      formatDate: (d, tz, pattern) => { assert.strictEqual(pattern, 'yyyy-MM-dd'); return fmt(d, tz); },
+      formatDate: (d, tz, pattern) => {
+        if (typeof tz !== 'string' || !tz) throw new Error('Invalid argument: timeZone. Should be of type: String');
+        if (pattern === 'yyyy') return String(d.getUTCFullYear());
+        assert.strictEqual(pattern, 'yyyy-MM-dd'); return fmt(d, tz);
+      },
       computeDigest: (_alg, s) => Array.from(crypto.createHash('sha256').update(s, 'utf8').digest()).map(b => (b > 127 ? b - 256 : b)),
       DigestAlgorithm: { SHA_256: 'SHA_256' },
       Charset: { UTF_8: 'UTF_8' },
@@ -227,7 +232,8 @@ test('invalid rows are reported, not sent; header order does not matter', () => 
   const order = [10, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12];
   const rows = sampleRows();
   rows[1][10] = 'abc';       // bad revenue
-  rows[2][3] = '';           // missing bill no
+  rows[2][3] = '';           // missing bill no -> still VALID (optional)
+  rows[3][2] = '';           // missing category
   rows.push(['', '', '', '', '', '', '', '', '', '', '', '', '']); // blank row ignored
   ss.sheets.Sales = new FakeSheet('Sales', [order.map(i => HEADER[i]), ...rows.map(r => order.map(i => r[i]))]);
   const ctx = makeContext(ss, db, { SUPABASE_URL: 'https://x.supabase.co', SUPABASE_SERVICE_ROLE_KEY: 'sb_secret_x' });
@@ -235,7 +241,8 @@ test('invalid rows are reported, not sent; header order does not matter', () => 
   assert.strictEqual(s.sheets[0].invalid, 2);
   assert.strictEqual(db.tx.size, 6);
   const errs = ss.sheets._sync_errors.data.slice(1).map(r => r[2]).sort();
-  assert.deepStrictEqual(errs, ['bill_no', 'revenue']);
+  assert.deepStrictEqual(errs, ['category', 'revenue']);
+  assert.ok([...db.tx.values()].some(r => r.bill_no === null), 'row without bill no is synced');
 });
 
 test('missing required header fails loudly', () => {
@@ -281,6 +288,25 @@ test('multiple tabs via SHEET_NAMES', () => {
   ctx.syncSales();
   assert.strictEqual(db.tx.size, 8);
   assert.deepStrictEqual([...new Set([...db.tx.values()].map(r => r.source_sheet))].sort(), ['Aug', 'Jul']);
+});
+
+test('real date cells work when the spreadsheet time zone is missing', () => {
+  for (const sheetTz of [undefined, '', null]) {
+    const ss = new FakeSpreadsheet(); const db = new FakeSupabase();
+    ss.getSpreadsheetTimeZone = () => sheetTz;
+    ss.sheets.Sales = new FakeSheet('Sales', [HEADER.slice(), ...sampleRows()]);
+    const ctx = makeContext(ss, db, { SUPABASE_URL: 'https://x.supabase.co', SUPABASE_SERVICE_ROLE_KEY: 'sb_secret_x' });
+    const s = ctx.syncSales();
+    assert.strictEqual(s.sheets[0].invalid, 0, 'no date errors');
+    assert.ok([...db.tx.values()].every(r => r.sale_date === '2026-07-01'));
+  }
+  // both sources broken -> Asia/Colombo
+  const ss = new FakeSpreadsheet(); const db = new FakeSupabase();
+  ss.getSpreadsheetTimeZone = () => undefined;
+  ss.sheets.Sales = new FakeSheet('Sales', [HEADER.slice(), ...sampleRows()]);
+  const ctx = makeContext(ss, db, { SUPABASE_URL: 'https://x.supabase.co', SUPABASE_SERVICE_ROLE_KEY: 'sb_secret_x', __scriptTz: '' });
+  assert.strictEqual(ctx.sheetTimeZone_(), 'Asia/Colombo');
+  assert.strictEqual(ctx.syncSales().sheets[0].invalid, 0);
 });
 
 console.log(`\n${passed} Apps Script tests passed`);
