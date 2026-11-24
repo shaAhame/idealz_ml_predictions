@@ -1,0 +1,156 @@
+# Scheduled retraining + daily forecast refresh + promotion-gated redeploy.
+#
+# Required repository secrets (Settings > Secrets and variables > Actions):
+#   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
+# Optional (deployment):
+#   RENDER_DEPLOY_HOOK_URL   Render > service > Settings > Deploy Hook
+#   API_BASE_URL             e.g. https://sales-forecast-api.onrender.com (used to verify the rollout)
+#   API_ADMIN_TOKEN          same value as the service's ADMIN_TOKEN (hot reload without redeploy)
+# Optional repository variables: TARGET_METRIC, FORECAST_HORIZON, BUSINESS_TZ, HOLIDAY_COUNTRY
+
+name: ml-pipeline
+
+on:
+  schedule:
+    - cron: "30 20 * * 0"   # weekly retrain + forecast: Mon 02:00 Asia/Colombo (Sun 20:30 UTC)
+    - cron: "30 21 * * *"   # daily forecast refresh:     03:00 Asia/Colombo
+  workflow_dispatch:
+    inputs:
+      task:
+        description: What to run
+        type: choice
+        options: [train-and-forecast, forecast-only]
+        default: train-and-forecast
+      promote:
+        description: Promotion policy for the trained model
+        type: choice
+        options: [auto, never, force]
+        default: auto
+
+concurrency:
+  group: ml-pipeline
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.13"
+  SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+  SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+  DATA_SOURCE: supabase
+  TARGET_METRIC: ${{ vars.TARGET_METRIC || 'revenue' }}
+  FORECAST_HORIZON: ${{ vars.FORECAST_HORIZON || '14' }}
+  BUSINESS_TZ: ${{ vars.BUSINESS_TZ || 'Asia/Colombo' }}
+  HOLIDAY_COUNTRY: ${{ vars.HOLIDAY_COUNTRY || 'LK' }}
+  LOG_LEVEL: INFO
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      train: ${{ steps.plan.outputs.train }}
+    steps:
+      - id: plan
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            [ "${{ inputs.task }}" = "train-and-forecast" ] && t=true || t=false
+          elif [ "${{ github.event.schedule }}" = "30 20 * * 0" ]; then
+            t=true
+          else
+            t=false
+          fi
+          echo "train=$t" >> "$GITHUB_OUTPUT"
+          echo "Plan: train=$t (event=${{ github.event_name }}, schedule='${{ github.event.schedule }}')"
+
+  train:
+    needs: plan
+    if: needs.plan.outputs.train == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+    outputs:
+      promoted: ${{ steps.train.outputs.promoted }}
+      model_version: ${{ steps.train.outputs.model_version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - run: pip install -r requirements.txt
+      - name: Train, evaluate, gate, register
+        id: train
+        run: python -m ml.train --promote "${{ inputs.promote || 'auto' }}" --output-dir artifacts
+      - name: Upload model artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-${{ steps.train.outputs.model_version || github.run_id }}
+          path: artifacts/
+          retention-days: 30
+          if-no-files-found: warn
+
+  forecast:
+    needs: [plan, train]
+    # Run after training (if any). Skipped training is fine; failed training is not.
+    if: ${{ always() && needs.plan.result == 'success' && (needs.train.result == 'success' || needs.train.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    env:
+      MODEL_SOURCE: supabase
+      MODEL_CACHE_DIR: ${{ github.workspace }}/model_cache
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - run: pip install -r requirements.txt
+      - name: Generate forecasts and upsert into sales_forecasts
+        run: python -m ml.predict_batch --out forecasts.csv
+      - uses: actions/upload-artifact@v4
+        with:
+          name: forecasts-${{ github.run_id }}
+          path: forecasts.csv
+          retention-days: 14
+
+  deploy:
+    needs: train
+    if: needs.train.outputs.promoted == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    env:
+      RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+      API_BASE_URL: ${{ secrets.API_BASE_URL }}
+      API_ADMIN_TOKEN: ${{ secrets.API_ADMIN_TOKEN }}
+      NEW_VERSION: ${{ needs.train.outputs.model_version }}
+    steps:
+      - name: Roll out the new production model
+        run: |
+          set -euo pipefail
+          if [ -n "${API_BASE_URL}" ] && [ -n "${API_ADMIN_TOKEN}" ]; then
+            echo "Hot-reloading model via /admin/reload"
+            curl -fsS --retry 3 -X POST -H "Authorization: Bearer ${API_ADMIN_TOKEN}" "${API_BASE_URL%/}/admin/reload"
+          elif [ -n "${RENDER_DEPLOY_HOOK_URL}" ]; then
+            echo "Triggering Render redeploy (service downloads the production model at startup)"
+            curl -fsS --retry 3 -X POST "${RENDER_DEPLOY_HOOK_URL}" > /dev/null
+          else
+            echo "::warning::No deploy target configured; the API picks up ${NEW_VERSION} on its next restart."
+            exit 0
+          fi
+      - name: Verify the API serves the new model
+        if: env.API_BASE_URL != ''
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 40); do
+            v=$(curl -fsS "${API_BASE_URL%/}/health" | python -c "import sys,json; print(json.load(sys.stdin).get('model_version',''))" || true)
+            echo "attempt $i: serving '${v}'"
+            [ "$v" = "${NEW_VERSION}" ] && echo "Rollout verified" && exit 0
+            sleep 15
+          done
+          echo "::error::API did not report ${NEW_VERSION} within 10 minutes"; exit 1

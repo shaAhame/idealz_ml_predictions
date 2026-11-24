@@ -1,0 +1,25 @@
+[project]
+name = "sales-forecasting"
+version = "1.0.0"
+description = "Google Sheets -> Supabase -> LightGBM -> FastAPI sales forecasting system"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q --strict-markers"
+filterwarnings = [
+  "error::FutureWarning",
+  "ignore:Using `httpx` with `starlette.testclient` is deprecated",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "PL", "N"]
+ignore = ["PLR0913", "PLR0917", "PLR0915", "PLR2004", "PLR0912", "N803", "N806", "RUF001", "PLC0415"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["PLR", "B", "SIM"]
