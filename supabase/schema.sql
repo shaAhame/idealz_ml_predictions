@@ -329,6 +329,87 @@ grant all on public.sales_transactions, public.sync_seen_rows, public.model_regi
 grant select on public.v_daily_sales, public.v_latest_forecasts to service_role;
 
 -- -----------------------------------------------------------------------------
+-- Dashboard (dashboard/index.html, hosted on GitHub Pages)
+-- -----------------------------------------------------------------------------
+-- The page signs in with Supabase Auth and the PUBLISHABLE key, then calls
+-- dashboard_data(). Only emails listed in dashboard_viewers get data, even if
+-- someone else manages to create an account. Add viewers with:
+--   insert into public.dashboard_viewers (email) values ('you@example.com');
+create table if not exists public.dashboard_viewers (
+  email      text primary key check (email = lower(btrim(email)) and email like '%@%'),
+  created_at timestamptz not null default now()
+);
+alter table public.dashboard_viewers enable row level security;  -- no policies: invisible to API users
+
+create or replace function public.is_dashboard_viewer()
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1 from public.dashboard_viewers
+     where email = lower(btrim(coalesce(auth.jwt() ->> 'email', '')))
+  );
+$$;
+
+create or replace function public.dashboard_data(p_days_back integer default 120)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = public
+as $$
+declare
+  v_today  date := (now() at time zone 'Asia/Colombo')::date;  -- CUSTOMIZE: business time zone
+  v_from   date := v_today - least(greatest(coalesce(p_days_back, 120), 14), 730);
+  v_target text;
+begin
+  if not public.is_dashboard_viewer() then
+    raise exception 'This account is not allowed to view the dashboard' using errcode = '42501';
+  end if;
+
+  select target_metric into v_target
+    from model_registry where status = 'production'
+   order by promoted_at desc nulls last limit 1;
+  v_target := coalesce(v_target, 'revenue');
+
+  return jsonb_build_object(
+    'today', v_today,
+    'target_metric', v_target,
+    'last_sync', (select max(updated_at) from sales_transactions),
+    'latest_sale_date', (select max(sale_date) from sales_transactions where deleted_at is null),
+    'model', (
+      select jsonb_build_object(
+        'model_version', model_version, 'trained_at', trained_at, 'promoted_at', promoted_at,
+        'data_end', data_end, 'wape', metrics -> 'wape', 'baseline_wape', baseline_metrics -> 'wape')
+        from model_registry where status = 'production' and target_metric = v_target
+       order by promoted_at desc nulls last limit 1),
+    'actuals', coalesce((
+      select jsonb_agg(jsonb_build_object(
+               'd', sale_date, 'location', location, 'category', category,
+               'value', case v_target when 'profit' then profit when 'units' then units else revenue end)
+             order by sale_date, location, category)
+        from v_daily_sales where sale_date >= v_from), '[]'::jsonb),
+    'forecasts', coalesce((
+      select jsonb_agg(jsonb_build_object(
+               'd', forecast_date, 'location', location, 'category', category,
+               'value', predicted_value, 'generated_at', generated_at)
+             order by forecast_date, location, category)
+        from v_latest_forecasts
+       where target_metric = v_target and forecast_date >= v_from), '[]'::jsonb)
+  );
+end;
+$$;
+
+revoke all on public.dashboard_viewers from anon, authenticated;
+revoke execute on function public.is_dashboard_viewer()          from public, anon;
+revoke execute on function public.dashboard_data(integer)        from public, anon;
+grant  execute on function public.is_dashboard_viewer()          to authenticated;
+grant  execute on function public.dashboard_data(integer)        to authenticated;
+
+-- -----------------------------------------------------------------------------
 -- Storage bucket for model artifacts (private; service_role bypasses storage RLS)
 -- -----------------------------------------------------------------------------
 insert into storage.buckets (id, name, public)

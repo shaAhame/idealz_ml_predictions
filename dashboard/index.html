@@ -1,0 +1,597 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src https://*.supabase.co http://127.0.0.1:* http://localhost:*; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
+<meta name="theme-color" content="#fcfcfb" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#1a1a19" media="(prefers-color-scheme: dark)">
+<title>Idealz · Sales forecast</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    color-scheme: light;
+    --page: #f4f3f0; --surface-1: #fcfcfb; --surface-2: #f0efec; --border: #e2e1dc;
+    --text-primary: #0b0b0b; --text-secondary: #52514e; --text-muted: #73726d;
+    --grid: #e7e6e1; --axis: #b7b6b0;
+    --series-1: #2a78d6;  /* Actual   (categorical slot 1, blue)   */
+    --series-2: #eb6834;  /* Forecast (categorical slot 2, orange) */
+    --bar: #2a78d6;
+    --warning: #fab219; --critical: #d03b3b;
+    --focus: #2a78d6;
+    --radius: 12px;
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --page: #111110; --surface-1: #1a1a19; --surface-2: #242422; --border: #31312e;
+      --text-primary: #f0efec; --text-secondary: #c3c2b7; --text-muted: #9a9991;
+      --grid: #2c2c29; --axis: #55554f;
+      --series-1: #3987e5; --series-2: #d95926; --bar: #3987e5; --focus: #3987e5;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--page); color: var(--text-primary); }
+  body { font-size: 15px; line-height: 1.45; -webkit-text-size-adjust: 100%; }
+  .wrap { max-width: 980px; margin: 0 auto; padding: max(16px, env(safe-area-inset-top)) 16px 40px; }
+  [hidden] { display: none !important; }
+  h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
+  h2 { font-size: 15px; margin: 0 0 2px; }
+  .sub { color: var(--text-secondary); font-size: 13px; }
+  .muted { color: var(--text-muted); }
+  .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+  button, select, input { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+  /* header */
+  .top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+  .linkbtn { background: none; border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; color: var(--text-secondary); font-size: 13px; white-space: nowrap; }
+  .badge { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; padding: 2px 8px; border-radius: 999px; background: var(--surface-2); }
+  .badge .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--warning); }
+
+  /* filters */
+  .filters { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 14px; }
+  .filters label { display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: var(--text-secondary); flex: 1 1 140px; max-width: 260px; }
+  .filters select { background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; min-height: 40px; }
+
+  /* KPI tiles */
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 14px; }
+  @media (max-width: 520px) { .kpi { padding: 12px; } .kpi .value { font-size: 22px; } .kpi .note { font-size: 12px; } }
+  .kpi .label { font-size: 13px; color: var(--text-secondary); }
+  .kpi .value { font-size: 26px; font-weight: 650; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; margin: 2px 0; }
+  .kpi .note { font-size: 13px; color: var(--text-muted); }
+  .delta { font-variant-numeric: tabular-nums; color: var(--text-secondary); }
+
+  /* charts */
+  .section { margin-bottom: 14px; }
+  .chart-head { display: flex; justify-content: space-between; align-items: flex-end; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+  .legend { display: flex; gap: 14px; font-size: 13px; color: var(--text-secondary); }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .legend svg { overflow: visible; }
+  .chart { position: relative; width: 100%; touch-action: pan-y; }
+  .chart svg { display: block; width: 100%; height: auto; overflow: visible; }
+  .chart text { fill: var(--text-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .tooltip { position: absolute; pointer-events: none; background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px;
+             padding: 8px 10px; font-size: 13px; box-shadow: 0 4px 16px rgba(0,0,0,.12); min-width: 150px; z-index: 2; }
+  .tooltip .t-date { font-weight: 600; margin-bottom: 4px; }
+  .tooltip .row { display: flex; justify-content: space-between; gap: 12px; font-variant-numeric: tabular-nums; }
+  .tooltip .key { display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); }
+  .sw { width: 14px; height: 0; border-top: 2px solid; display: inline-block; }
+  .sw.dash { border-top-style: dashed; }
+  .bars .bar-row { display: grid; grid-template-columns: minmax(96px, 42%) 1fr auto; align-items: center; gap: 8px; padding: 6px 0; }
+  .bars .bar-name { font-size: 13px; line-height: 1.25; color: var(--text-secondary); overflow-wrap: anywhere; }
+  .bars .bar-track { height: 14px; }
+  .bars .bar-fill { height: 14px; border-radius: 0 4px 4px 0; background: var(--bar); min-width: 2px; }
+  .bars .bar-val { font-size: 13px; font-variant-numeric: tabular-nums; text-align: right; min-width: 64px; white-space: nowrap; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 14px; font-variant-numeric: tabular-nums; }
+  th, td { padding: 8px 6px; border-bottom: 1px solid var(--grid); text-align: right; }
+  td + td { white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; }
+  th { font-weight: 600; color: var(--text-secondary); font-size: 12px; }
+  tr.weekend td:first-child { color: var(--text-primary); font-weight: 600; }
+
+  /* login */
+  .login { max-width: 380px; margin: 12vh auto 0; }
+  .login form { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; }
+  .login input { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; background: var(--surface-1); min-height: 44px; }
+  .primary { background: var(--series-1); color: #fff; border: 0; border-radius: 8px; padding: 11px; font-weight: 600; min-height: 44px; }
+  .primary[disabled] { opacity: .6; }
+  .error { color: var(--critical); font-size: 14px; }
+  .empty { padding: 24px 8px; text-align: center; color: var(--text-muted); }
+  .foot { font-size: 12px; color: var(--text-muted); margin-top: 18px; }
+  .skeleton { height: 220px; border-radius: 8px; background: var(--surface-2); }
+</style>
+</head>
+<body>
+<script src="config.js"></script>
+
+<!-- Setup message (config.js missing) -->
+<div class="wrap" id="setup" hidden>
+  <div class="card login">
+    <h1>Dashboard not configured</h1>
+    <p class="sub">The deployment did not include <code>config.js</code>. Add the repository variable
+      <code>SUPABASE_PUBLISHABLE_KEY</code> and re-run the <em>dashboard</em> workflow.</p>
+  </div>
+</div>
+
+<!-- Login -->
+<div class="wrap" id="login-view" hidden>
+  <div class="card login">
+    <h1>Idealz sales forecast</h1>
+    <p class="sub">Sign in with your dashboard account.</p>
+    <form id="login-form" novalidate>
+      <input id="email" type="email" autocomplete="username" placeholder="Email" required>
+      <input id="password" type="password" autocomplete="current-password" placeholder="Password" required>
+      <button class="primary" id="login-btn" type="submit">Sign in</button>
+      <div class="error" id="login-error" role="alert"></div>
+    </form>
+  </div>
+</div>
+
+<!-- Dashboard -->
+<div class="wrap" id="dash-view" hidden>
+  <div class="top">
+    <div>
+      <h1>Sales forecast</h1>
+      <div class="sub" id="status-line">Loading…</div>
+    </div>
+    <button class="linkbtn" id="signout" type="button">Sign out</button>
+  </div>
+
+  <div class="filters" id="filters">
+    <label>Location <select id="f-location"></select></label>
+    <label>Category <select id="f-category"></select></label>
+  </div>
+
+  <div class="error" id="dash-error" role="alert" hidden></div>
+
+  <div class="kpis" id="kpis">
+    <div class="card kpi" id="kpi-next7"><div class="label">Forecast · next 7 days</div><div class="value">—</div><div class="note"></div></div>
+    <div class="card kpi" id="kpi-next14"><div class="label">Forecast · next 14 days</div><div class="value">—</div><div class="note"></div></div>
+    <div class="card kpi" id="kpi-last7"><div class="label">Actual · last 7 days</div><div class="value">—</div><div class="note"></div></div>
+    <div class="card kpi" id="kpi-accuracy"><div class="label">Forecast accuracy</div><div class="value">—</div><div class="note"></div></div>
+  </div>
+
+  <div class="card section" id="trend-card">
+    <div class="chart-head">
+      <div><h2 id="trend-title">Daily revenue</h2><div class="sub">Last 8 weeks and the next 14 days · tap the chart for values</div></div>
+      <div class="legend" aria-hidden="true">
+        <span><i class="sw" style="border-color:var(--series-1)"></i>Actual</span>
+        <span><i class="sw dash" style="border-color:var(--series-2)"></i>Forecast</span>
+      </div>
+    </div>
+    <div class="chart" id="trend"><div class="skeleton"></div></div>
+  </div>
+
+  <div class="card section" id="split-card">
+    <h2 id="split-title">Next 7 days by category</h2>
+    <div class="sub">Forecast total for each group</div>
+    <div class="bars" id="split"></div>
+  </div>
+
+  <div class="card section" id="table-card">
+    <h2>Day by day</h2>
+    <div class="sub">Forecast for each day, next to the same weekday last week</div>
+    <div style="overflow-x:auto"><table id="daily-table"><thead><tr>
+      <th scope="col">Day</th><th scope="col">Forecast</th><th scope="col">Same day last week</th>
+    </tr></thead><tbody></tbody></table></div>
+  </div>
+
+  <div class="foot" id="foot">
+    Sales sync from the Google Sheet every 15 minutes. New forecasts are made every night at 03:00 and the model
+    retrains every Monday. Today is a forecast, because its sales are still coming in.
+  </div>
+</div>
+
+<script>
+(() => {
+  "use strict";
+
+  // --------------------------------------------------------------------------
+  // Config & session
+  // --------------------------------------------------------------------------
+  const CFG = window.DASHBOARD_CONFIG || {};
+  const API = (CFG.supabaseUrl || "").replace(/\/+$/, "");
+  const KEY = CFG.publishableKey || "";
+  const SESSION_KEY = "idealz-dashboard-session";
+  const FILTER_KEY = "idealz-dashboard-filters";
+  const DAYS_BACK = 120, TREND_DAYS = 56;
+
+  const $ = (id) => document.getElementById(id);
+  const show = (id) => { for (const v of ["setup", "login-view", "dash-view"]) $(v).hidden = v !== id; };
+
+  const store = {
+    get(k) { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } },
+    set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* private mode */ } },
+    del(k) { try { localStorage.removeItem(k); } catch { /* ignore */ } },
+  };
+
+  async function authToken(grant, body) {
+    const r = await fetch(`${API}/auth/v1/token?grant_type=${grant}`, {
+      method: "POST", headers: { apikey: KEY, "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      const msg = j.error_description || j.msg || j.message || `Sign-in failed (HTTP ${r.status})`;
+      throw new Error(/invalid login/i.test(msg) ? "Wrong email or password." : msg);
+    }
+    return {
+      access_token: j.access_token, refresh_token: j.refresh_token,
+      expires_at: j.expires_at || Math.floor(Date.now() / 1000) + (j.expires_in || 3600),
+      email: (j.user && j.user.email) || body.email || null,
+    };
+  }
+
+  async function accessToken(force) {
+    let s = store.get(SESSION_KEY);
+    if (!s || !s.refresh_token) return null;
+    if (force || s.expires_at - 60 < Date.now() / 1000) {
+      try { s = { ...s, ...(await authToken("refresh_token", { refresh_token: s.refresh_token })) }; store.set(SESSION_KEY, s); }
+      catch { store.del(SESSION_KEY); return null; }
+    }
+    return s.access_token;
+  }
+
+  class NotAllowed extends Error {}
+
+  async function loadData(retried) {
+    const token = await accessToken(retried);
+    if (!token) return null;
+    const r = await fetch(`${API}/rest/v1/rpc/dashboard_data`, {
+      method: "POST",
+      headers: { apikey: KEY, Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ p_days_back: DAYS_BACK }),
+    });
+    if (r.status === 401 && !retried) return loadData(true);
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      if (j.code === "42501" || r.status === 403) throw new NotAllowed(j.message || "Not allowed");
+      throw new Error(j.message || `Could not load data (HTTP ${r.status})`);
+    }
+    return j;
+  }
+
+  // --------------------------------------------------------------------------
+  // Formatting
+  // --------------------------------------------------------------------------
+  let METRIC = "revenue";
+  const nf0 = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
+  const nfc = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 });
+  const money = (v) => (METRIC === "units" ? "" : "Rs ");
+  const fmt = (v) => (v == null || !isFinite(v) ? "—" : money(v) + nf0.format(Math.round(v)));
+  const fmtC = (v) => (v == null || !isFinite(v) ? "—" : money(v) + nfc.format(v));
+  const DAY = 86400000;
+  const iso = (d) => d.toISOString().slice(0, 10);
+  const parse = (s) => new Date(s + "T00:00:00Z");
+  const addDays = (s, n) => iso(new Date(parse(s).getTime() + n * DAY));
+  const dfLong = new Intl.DateTimeFormat("en-GB", { weekday: "short", day: "numeric", month: "short", timeZone: "UTC" });
+  const dfShort = new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", timeZone: "UTC" });
+  const longDate = (s) => dfLong.format(parse(s));
+  const shortDate = (s) => dfShort.format(parse(s));
+  const isWeekend = (s) => { const w = parse(s).getUTCDay(); return w === 0 || w === 6; };
+  const ago = (ts) => {
+    if (!ts) return "never";
+    const m = Math.round((Date.now() - new Date(ts).getTime()) / 60000);
+    if (m < 1) return "just now"; if (m < 60) return `${m} min ago`;
+    const h = Math.round(m / 60); if (h < 48) return `${h} h ago`;
+    return `${Math.round(h / 24)} days ago`;
+  };
+
+  // --------------------------------------------------------------------------
+  // State
+  // --------------------------------------------------------------------------
+  let DATA = null;
+  const filters = Object.assign({ location: "", category: "" }, store.get(FILTER_KEY) || {});
+
+  const keep = (r) => (!filters.location || r.location === filters.location) && (!filters.category || r.category === filters.category);
+
+  function sumByDate(rows) {
+    const m = new Map();
+    for (const r of rows) if (keep(r)) m.set(r.d, (m.get(r.d) || 0) + Number(r.value || 0));
+    return m;
+  }
+  function sumRange(map, from, to) {
+    let s = 0, any = false;
+    for (let d = from; d <= to; d = addDays(d, 1)) if (map.has(d)) { s += map.get(d); any = true; }
+    return any ? s : null;
+  }
+
+  // --------------------------------------------------------------------------
+  // Rendering
+  // --------------------------------------------------------------------------
+  function el(tag, attrs, text) {
+    const e = document.createElement(tag);
+    if (attrs) for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+    if (text != null) e.textContent = text;
+    return e;
+  }
+  function svg(tag, attrs) {
+    const e = document.createElementNS("http://www.w3.org/2000/svg", tag);
+    for (const [k, v] of Object.entries(attrs || {})) e.setAttribute(k, v);
+    return e;
+  }
+
+  function fillSelect(sel, values, current, allLabel) {
+    sel.replaceChildren(el("option", { value: "" }, allLabel));
+    for (const v of values) { const o = el("option", { value: v }, v); if (v === current) o.selected = true; sel.append(o); }
+    if (current && !values.includes(current)) { filters[sel.id === "f-location" ? "location" : "category"] = ""; }
+  }
+
+  function renderFilters() {
+    const rows = DATA.actuals.concat(DATA.forecasts);
+    const locs = [...new Set(rows.map((r) => r.location))].sort();
+    const cats = [...new Set(rows.map((r) => r.category))].sort();
+    fillSelect($("f-location"), locs, filters.location, "All locations");
+    fillSelect($("f-category"), cats, filters.category, "All categories");
+    $("filters").hidden = locs.length <= 1 && cats.length <= 1;
+  }
+
+  function setKpi(id, value, note) {
+    const c = $(id);
+    c.querySelector(".value").textContent = value;
+    c.querySelector(".note").textContent = note || "";
+  }
+
+  function renderKpis(act, fc, today) {
+    const next7 = sumRange(fc, today, addDays(today, 6));
+    const next14 = sumRange(fc, today, addDays(today, 13));
+    const last7 = sumRange(act, addDays(today, -7), addDays(today, -1)) || 0;
+    const prev7 = sumRange(act, addDays(today, -14), addDays(today, -8)) || 0;
+    setKpi("kpi-next7", fmtC(next7), next7 == null ? "No forecast yet" : `${shortDate(today)} – ${shortDate(addDays(today, 6))}`);
+    setKpi("kpi-next14", fmtC(next14), next14 == null ? "No forecast yet" : `through ${shortDate(addDays(today, 13))}`);
+    let note = "vs previous 7 days: no data";
+    if (prev7 > 0) {
+      const ch = (last7 - prev7) / prev7;
+      note = `${ch >= 0 ? "▲" : "▼"} ${Math.abs(ch * 100).toFixed(0)}% vs previous 7 days`;
+    }
+    setKpi("kpi-last7", fmtC(last7), note);
+    const m = DATA.model;
+    if (m && m.wape != null) {
+      const w = Number(m.wape), b = Number(m.baseline_wape);
+      const better = isFinite(b) && b > 0 ? `, ${Math.round((1 - w / b) * 100)}% better than "same as last week"` : "";
+      setKpi("kpi-accuracy", `±${Math.round(w * 100)}%`, `Typical daily error per category (all locations)${better}`);
+    } else {
+      setKpi("kpi-accuracy", "—", "No production model yet");
+    }
+  }
+
+  function renderStatus() {
+    const parts = [`Synced ${ago(DATA.last_sync)}`];
+    if (DATA.latest_sale_date) parts.push(`latest sale ${shortDate(DATA.latest_sale_date)}`);
+    const line = $("status-line");
+    line.replaceChildren(document.createTextNode(parts.join(" · ")));
+    const stale = DATA.latest_sale_date && (parse(DATA.today) - parse(DATA.latest_sale_date)) / DAY > 3;
+    if (stale) {
+      const b = el("span", { class: "badge", role: "status" });
+      b.append(el("span", { class: "dot", "aria-hidden": "true" }), document.createTextNode("⚠ No new sales for 3+ days. Check the sheet sync"));
+      line.append(document.createElement("br"), b);
+    }
+  }
+
+  // --- Trend chart: actual (solid) vs forecast (dashed), crosshair tooltip ---
+  function renderTrend(act, fc, today) {
+    const box = $("trend");
+    box.replaceChildren();
+    const fcDates = [...fc.keys()].sort();
+    const start = addDays(today, -TREND_DAYS);
+    const end = fcDates.length ? fcDates[fcDates.length - 1] : addDays(today, -1);
+    const dates = [];
+    for (let d = start; d <= end; d = addDays(d, 1)) dates.push(d);
+    const firstActual = [...act.keys()].sort()[0];
+    const pts = dates.map((d) => ({
+      d,
+      a: d < today && firstActual && d >= firstActual ? act.get(d) || 0 : null,  // missing day = no sales
+      f: fc.has(d) ? fc.get(d) : null,
+    }));
+    if (!pts.some((p) => p.a != null || p.f != null)) { box.append(el("div", { class: "empty" }, "No data for this selection.")); return; }
+
+    const W = Math.max(300, box.clientWidth), H = W < 520 ? 230 : 280;
+    const m = { t: 12, r: 12, b: 26, l: 52 };
+    const iw = W - m.l - m.r, ih = H - m.t - m.b;
+    const ymax = Math.max(1, ...pts.map((p) => Math.max(p.a || 0, p.f || 0))) * 1.08;
+    const x = (i) => m.l + (dates.length === 1 ? iw / 2 : (i / (dates.length - 1)) * iw);
+    const y = (v) => m.t + ih - (v / ymax) * ih;
+
+    const s = svg("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": `${METRIC} per day, actual and forecast` });
+    // grid + y ticks
+    const step = niceStep(ymax / 4);
+    for (let v = 0; v <= ymax; v += step) {
+      s.append(svg("line", { x1: m.l, x2: W - m.r, y1: y(v), y2: y(v), stroke: v === 0 ? "var(--axis)" : "var(--grid)", "stroke-width": 1 }));
+      const t = svg("text", { x: m.l - 6, y: y(v) + 4, "text-anchor": "end" }); t.textContent = fmtC(v).replace("Rs ", ""); s.append(t);
+    }
+    // x ticks: weekly
+    const every = W < 520 ? 14 : 7;
+    dates.forEach((d, i) => {
+      if ((dates.length - 1 - i) % every === 0) {
+        const t = svg("text", { x: x(i), y: H - 6, "text-anchor": "middle" }); t.textContent = shortDate(d); s.append(t);
+      }
+    });
+    // today marker
+    const ti = dates.indexOf(today);
+    if (ti >= 0) {
+      s.append(svg("line", { x1: x(ti), x2: x(ti), y1: m.t, y2: m.t + ih, stroke: "var(--axis)", "stroke-dasharray": "2 3" }));
+      const t = svg("text", { x: x(ti) + 4, y: m.t + 10 }); t.textContent = "Today"; s.append(t);
+    }
+    const path = (key) => {
+      let dstr = "", on = false;
+      pts.forEach((p, i) => { if (p[key] == null) { on = false; return; } dstr += `${on ? "L" : "M"}${x(i).toFixed(1)},${y(p[key]).toFixed(1)}`; on = true; });
+      return dstr;
+    };
+    s.append(svg("path", { d: path("a"), fill: "none", stroke: "var(--series-1)", "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }));
+    s.append(svg("path", { d: path("f"), fill: "none", stroke: "var(--series-2)", "stroke-width": 2, "stroke-dasharray": "5 4", "stroke-linejoin": "round" }));
+
+    // crosshair layer
+    const cross = svg("line", { y1: m.t, y2: m.t + ih, stroke: "var(--text-muted)", "stroke-width": 1, visibility: "hidden" });
+    const dotA = svg("circle", { r: 4.5, fill: "var(--series-1)", stroke: "var(--surface-1)", "stroke-width": 2, visibility: "hidden" });
+    const dotF = svg("circle", { r: 4.5, fill: "var(--series-2)", stroke: "var(--surface-1)", "stroke-width": 2, visibility: "hidden" });
+    s.append(cross, dotA, dotF);
+    const hit = svg("rect", { x: m.l, y: 0, width: iw, height: H, fill: "transparent" });
+    s.append(hit);
+    box.append(s);
+
+    const tip = el("div", { class: "tooltip", hidden: "" });
+    box.append(tip);
+    const showAt = (clientX) => {
+      const r = s.getBoundingClientRect();
+      const px = ((clientX - r.left) / r.width) * W;
+      const i = Math.max(0, Math.min(dates.length - 1, Math.round(((px - m.l) / iw) * (dates.length - 1))));
+      const p = pts[i];
+      cross.setAttribute("x1", x(i)); cross.setAttribute("x2", x(i)); cross.setAttribute("visibility", "visible");
+      for (const [dot, v] of [[dotA, p.a], [dotF, p.f]]) {
+        if (v == null) { dot.setAttribute("visibility", "hidden"); continue; }
+        dot.setAttribute("cx", x(i)); dot.setAttribute("cy", y(v)); dot.setAttribute("visibility", "visible");
+      }
+      tip.replaceChildren(el("div", { class: "t-date" }, longDate(p.d) + (p.d === today ? " (today)" : "")));
+      const row = (label, cls, color, v) => {
+        const rr = el("div", { class: "row" });
+        const k = el("span", { class: "key" }); const sw = el("i", { class: `sw ${cls}`, style: `border-color:${color}` });
+        k.append(sw, document.createTextNode(label)); rr.append(k, el("span", null, fmt(v))); tip.append(rr);
+      };
+      if (p.a != null) row("Actual", "", "var(--series-1)", p.a);
+      if (p.f != null) row("Forecast", "dash", "var(--series-2)", p.f);
+      if (p.a == null && p.f == null) tip.append(el("div", { class: "muted" }, "No data"));
+      tip.hidden = false;
+      const bw = box.clientWidth, tw = tip.offsetWidth;
+      const left = (x(i) / W) * bw;
+      tip.style.left = `${Math.min(Math.max(0, left + 12 + tw > bw ? left - tw - 12 : left + 12), Math.max(0, bw - tw))}px`;
+      tip.style.top = "4px";
+    };
+    const hide = () => { tip.hidden = true; for (const n of [cross, dotA, dotF]) n.setAttribute("visibility", "hidden"); };
+    hit.addEventListener("pointermove", (e) => showAt(e.clientX));
+    hit.addEventListener("pointerdown", (e) => showAt(e.clientX));
+    hit.addEventListener("pointerleave", (e) => { if (e.pointerType === "mouse") hide(); });
+  }
+
+  function niceStep(raw) {
+    const p = Math.pow(10, Math.floor(Math.log10(raw)));
+    for (const k of [1, 2, 2.5, 5, 10]) if (raw <= k * p) return k * p;
+    return 10 * p;
+  }
+
+  // --- Next 7 days split ---
+  function renderSplit(today) {
+    const box = $("split");
+    box.replaceChildren();
+    const to = addDays(today, 6);
+    const multiLoc = new Set(DATA.forecasts.filter(keep).map((r) => r.location)).size > 1;
+    const groupOf = (r) => (filters.category ? r.location : multiLoc ? `${r.category} · ${r.location}` : r.category);
+    $("split-title").textContent = filters.category ? "Next 7 days by location" : "Next 7 days by category";
+    const g = new Map();
+    for (const r of DATA.forecasts) if (keep(r) && r.d >= today && r.d <= to) g.set(groupOf(r), (g.get(groupOf(r)) || 0) + Number(r.value));
+    const rows = [...g.entries()].sort((a, b) => b[1] - a[1]);
+    if (!rows.length) { box.append(el("div", { class: "empty" }, "No forecast for the next 7 days yet.")); return; }
+    const max = rows[0][1] || 1;
+    for (const [name, v] of rows) {
+      const row = el("div", { class: "bar-row" });
+      const track = el("div", { class: "bar-track" });
+      const fill = el("div", { class: "bar-fill", title: `${name}: ${fmt(v)}` });
+      fill.style.width = `${Math.max(0.5, (v / max) * 100)}%`;
+      track.append(fill);
+      row.append(el("div", { class: "bar-name", title: name }, name), track, el("div", { class: "bar-val" }, fmtC(v)));
+      box.append(row);
+    }
+  }
+
+  // --- Daily table ---
+  function renderTable(act, fc, today) {
+    const tb = $("daily-table").querySelector("tbody");
+    tb.replaceChildren();
+    const days = [...fc.keys()].filter((d) => d >= today).sort();
+    if (!days.length) { const tr = el("tr"); const td = el("td", { colspan: 3, class: "empty" }, "No forecast yet."); tr.append(td); tb.append(tr); return; }
+    for (const d of days) {
+      const tr = el("tr", { class: isWeekend(d) ? "weekend" : "" });
+      const lw = addDays(d, -7);
+      tr.append(el("td", null, longDate(d) + (d === today ? " · today" : "")), el("td", null, fmt(fc.get(d))),
+                el("td", { class: "muted" }, lw < today ? fmt(act.get(lw) || 0) : "—"));
+      tb.append(tr);
+    }
+  }
+
+  function renderAll() {
+    if (!DATA) return;
+    METRIC = DATA.target_metric || "revenue";
+    $("trend-title").textContent = `Daily ${METRIC}`;
+    const today = DATA.today;
+    const act = sumByDate(DATA.actuals), fc = sumByDate(DATA.forecasts);
+    renderStatus();
+    renderKpis(act, fc, today);
+    renderTrend(act, fc, today);
+    renderSplit(today);
+    renderTable(act, fc, today);
+  }
+
+  // --------------------------------------------------------------------------
+  // Flow
+  // --------------------------------------------------------------------------
+  async function refresh() {
+    try {
+      const d = await loadData(false);
+      if (!d) { show("login-view"); return; }
+      DATA = d;
+      $("dash-error").hidden = true;
+      show("dash-view");
+      renderFilters();
+      renderAll();
+    } catch (e) {
+      if (e instanceof NotAllowed) {
+        store.del(SESSION_KEY);
+        show("login-view");
+        $("login-error").textContent = "This account is not on the dashboard viewer list. Ask the owner to add your email.";
+        return;
+      }
+      show("dash-view");
+      const box = $("dash-error");
+      box.textContent = `Couldn't refresh: ${e.message}. Showing the last loaded numbers.`;
+      box.hidden = false;
+    }
+  }
+
+  $("login-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const btn = $("login-btn"), err = $("login-error");
+    err.textContent = "";
+    const email = $("email").value.trim(), password = $("password").value;
+    if (!email || !password) { err.textContent = "Enter your email and password."; return; }
+    btn.disabled = true; btn.textContent = "Signing in…";
+    try {
+      store.set(SESSION_KEY, await authToken("password", { email, password }));
+      $("password").value = "";
+      await refresh();
+    } catch (e) {
+      err.textContent = e.message;
+    } finally {
+      btn.disabled = false; btn.textContent = "Sign in";
+    }
+  });
+
+  $("signout").addEventListener("click", async () => {
+    const s = store.get(SESSION_KEY);
+    store.del(SESSION_KEY);
+    DATA = null;
+    if (s && s.access_token) {
+      fetch(`${API}/auth/v1/logout`, { method: "POST", headers: { apikey: KEY, Authorization: `Bearer ${s.access_token}` } }).catch(() => {});
+    }
+    show("login-view");
+  });
+
+  for (const [id, key] of [["f-location", "location"], ["f-category", "category"]]) {
+    $(id).addEventListener("change", (e) => { filters[key] = e.target.value; store.set(FILTER_KEY, filters); renderAll(); });
+  }
+
+  let lastW = 0;
+  new ResizeObserver(() => { const w = $("trend").clientWidth; if (DATA && Math.abs(w - lastW) > 4) { lastW = w; renderAll(); } }).observe($("trend"));
+  document.addEventListener("visibilitychange", () => { if (!document.hidden && DATA) refresh(); });
+  setInterval(() => { if (!document.hidden && DATA) refresh(); }, 10 * 60 * 1000);
+
+  if (!API || !KEY) { show("setup"); return; }
+  if (store.get(SESSION_KEY)) { show("dash-view"); refresh(); } else { show("login-view"); }
+})();
+</script>
+</body>
+</html>

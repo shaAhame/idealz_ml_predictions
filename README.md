@@ -50,6 +50,9 @@ scripts/make_sample_data.py       Synthetic data in the sheet's exact format
 tests/                            46 pytest tests + Node harness for the Apps Script
 docs/DEPLOYMENT.md                Render / Cloud Run / Railway
 docs/VERIFICATION.md              Step-by-step verification checklist
+docs/DASHBOARD.md                 Phone-friendly dashboard on GitHub Pages (setup + privacy)
+dashboard/index.html              The dashboard page (no data or secrets inside)
+.github/workflows/dashboard.yml   Publishes the dashboard to GitHub Pages
 ```
 
 ## Quick start (local, no Supabase needed)
@@ -110,7 +113,10 @@ in `_sync_log`. Copy-pasted rows automatically get a new id.
 ### 4. Deploy the API
 See **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** (Render, Google Cloud Run, Railway).
 
-### 5. Verify
+### 5. Dashboard (optional)
+Forecast vs actual on your phone, login-protected: see **[docs/DASHBOARD.md](docs/DASHBOARD.md)**.
+
+### 6. Verify
 Follow **[docs/VERIFICATION.md](docs/VERIFICATION.md)**.
 
 ## How the ML works

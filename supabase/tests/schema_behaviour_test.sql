@@ -95,5 +95,29 @@ do $$ begin
 end $$;
 reset role;
 
+-- 7. Dashboard: only allow-listed emails get data; anon cannot call it at all
+insert into dashboard_viewers(email) values ('owner@shop.lk');
+set local role authenticated;
+select set_config('request.jwt.claims', '{"email":"Owner@Shop.lk","role":"authenticated"}', true);
+do $$
+declare d jsonb;
+begin
+  d := dashboard_data(30);
+  assert d->>'target_metric' = 'revenue', 'target';
+  assert jsonb_typeof(d->'actuals') = 'array' and jsonb_typeof(d->'forecasts') = 'array', 'arrays';
+  assert (d->'model'->>'model_version') = 'v2', 'production model';
+end $$;
+select set_config('request.jwt.claims', '{"email":"stranger@example.com","role":"authenticated"}', true);
+do $$ begin
+  begin perform dashboard_data(30); raise exception 'stranger got data'; exception when insufficient_privilege then null; end;
+  begin perform 1 from dashboard_viewers; raise exception 'viewer list readable'; exception when insufficient_privilege then null; end;
+end $$;
+reset role;
+set local role anon;
+do $$ begin
+  begin perform dashboard_data(30); raise exception 'anon got data'; exception when insufficient_privilege then null; end;
+end $$;
+reset role;
+
 select 'ALL SCHEMA BEHAVIOUR TESTS PASSED' as result;
 rollback;

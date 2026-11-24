@@ -9,3 +9,6 @@ data/*.csv
 forecasts*.csv
 model_cache/
 node_modules/
+
+# generated at deploy time
+dashboard/config.js
