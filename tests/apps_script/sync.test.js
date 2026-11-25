@@ -37,9 +37,13 @@ class FakeRange {
   clearContent() { return this.setValues(Array.from({ length: this.nr }, () => Array(this.nc).fill(''))); }
   clearContents() { return this.clearContent(); }
   setFontWeight() { return this; }
+  setNumberFormat(f) { this.sheet.formats.push([this.r, this.c, this.nr, this.nc, f]); return this; }
 }
 class FakeSheet {
-  constructor(name, data) { this.name = name; this.data = data; this.maxCols = 26; this.writes = 0; this.hidden = []; }
+  constructor(name, data) { this.name = name; this.data = data; this.maxCols = 26; this.writes = 0; this.hidden = []; this.formats = []; }
+  clear() { this.data = []; }
+  setFrozenRows() {}
+  setColumnWidth() {}
   getName() { return this.name; }
   getLastRow() { let n = 0; this.data.forEach((r, i) => { if (r && r.some(v => v !== '' && v !== undefined && v !== null)) n = i + 1; }); return n; }
   getLastColumn() { let n = 0; this.data.forEach(r => { (r || []).forEach((v, j) => { if (v !== '' && v !== undefined && v !== null) n = Math.max(n, j + 1); }); }); return n; }
@@ -118,7 +122,9 @@ function makeContext(ss, db, props) {
     Date, Math, JSON, Number, String, Object, Array, Error, isFinite, isNaN, parseInt, parseFloat, RegExp,
   };
   vm.createContext(ctx);
-  vm.runInContext(fs.readFileSync(path.join(__dirname, '../../apps_script/sync_to_supabase.gs'), 'utf8'), ctx);
+  for (const f of ['sync_to_supabase.gs', 'history_import.gs']) {
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '../../apps_script', f), 'utf8'), ctx);
+  }
   ctx.__logs = logs;
   return ctx;
 }
@@ -307,6 +313,83 @@ test('real date cells work when the spreadsheet time zone is missing', () => {
   const ctx = makeContext(ss, db, { SUPABASE_URL: 'https://x.supabase.co', SUPABASE_SERVICE_ROLE_KEY: 'sb_secret_x', __scriptTz: '' });
   assert.strictEqual(ctx.sheetTimeZone_(), 'Asia/Colombo');
   assert.strictEqual(ctx.syncSales().sheets[0].invalid, 0);
+});
+
+// ---------- history import (history_import.gs) ----------
+const RAW_HEADER = ['DATE', 'LOCATION', 'CATEGORY', 'BILL NO', 'IMEI', 'BRAND', 'Clean Brand', 'MODEL', 'Clean Model',
+  'CAPACITY', 'Clean Capacity', 'COLOUR', 'Clean Color', 'VARIANT', 'SALES Rep.', 'Clean Sales Rep', 'CASH', 'SAMPATH',
+  'AMANA', 'BANK', 'SEYLAN', 'COMMERCIAL', 'AMEX', 'WEB', 'TOTAL', 'REMARKS', 'SOURCE'];
+function rawRow(date, cat, brand, total, pay) {
+  const p = Object.assign({ CASH: total }, pay || {});
+  const payCols = ['CASH', 'SAMPATH', 'AMANA', 'BANK', 'SEYLAN', 'COMMERCIAL', 'AMEX', 'WEB'].map(k => p[k] || 0);
+  return [date, 'ISEVEN', cat, '', 356789012345678, brand.toUpperCase(), brand, 'IPHONE 16', 'Iphone 16', '128GB', '128Gb',
+    'BLACK', 'Black', '', 'IMRAN', 'Imran', ...payCols, total, '', 'old master'];
+}
+function historyFixture() {
+  const ss = new FakeSpreadsheet();
+  ss.sheets.profit = new FakeSheet('profit', [HEADER.slice(), ...sampleRows().map(r => { r = r.slice(); r[0] = d(2026, 7, 1); return r; })]);
+  ss.sheets.excel_raw = new FakeSheet('excel_raw', [RAW_HEADER.slice(),
+    rawRow('8-19-2025', 'DEVICE', 'Apple', 115000),
+    rawRow('8-5-2025', 'DEVICE', 'Apple', 1000),                         // before start (5 Aug), NOT 8 May
+    rawRow('9-8-2025', 'ACCESSORIES', 'Tempered', '1,000.00'),           // 8 September, not 9 August
+    rawRow(d(2026, 1, 15), 'accessories ', 'Case', 3500, { CASH: 0, SEYLAN: 3500 }),
+    rawRow('6-30-2026', 'DEVICE', 'Samsung', 36000, { CASH: 30000 }),   // payments 30000 != 36000
+    rawRow('12-1-2025', 'DEVICE', 'Apple', 0),
+    rawRow('7-1-2026', 'DEVICE', 'Apple', 245000),                       // overlap: already in live tab
+    rawRow('13-45-2025', 'DEVICE', 'Apple', 5),                          // invalid date
+    rawRow('', '', '', ''),                                              // blank
+  ]);
+  ss.sheets.excel_raw.data[9] = Array(RAW_HEADER.length).fill('');
+  return ss;
+}
+
+test('buildHistory converts month-day-year Excel rows into the live format', () => {
+  const ss = historyFixture(); const db = new FakeSupabase();
+  const ctx = makeContext(ss, db, { SUPABASE_URL: 'https://x.supabase.co', SUPABASE_SERVICE_ROLE_KEY: 'sb_secret_x', SHEET_NAMES: 'profit' });
+  const st = ctx.buildHistory();
+  assert.strictEqual(st.kept, 5); assert.strictEqual(st.overlap, 1); assert.strictEqual(st.beforeStart, 1);
+  assert.strictEqual(st.invalid, 1); assert.strictEqual(st.zero, 1); assert.strictEqual(st.payMismatch, 1);
+  const h = ss.sheets.history.data;
+  assert.deepStrictEqual(h[0], ['Date', 'Location', 'Category', 'Bill No.', 'IMEI', 'Brand/Item', 'Model', 'Capacity', 'Colour', 'Sales Rep', 'Revenue', 'Cost']);
+  assert.deepStrictEqual(h.slice(1).map(r => r[0]), ['2025-08-19', '2025-09-08', '2026-01-15', '2026-06-30', '2025-12-01']);
+  assert.strictEqual(h[1][5], 'Apple'); assert.strictEqual(h[1][6], 'Iphone 16'); assert.strictEqual(h[1][9], 'Imran');
+  assert.strictEqual(h[1][4], '356789012345678'); assert.strictEqual(h[3][2], 'ACCESSORIES'); assert.strictEqual(h[2][10], 1000);
+  assert.strictEqual(h[1][11], '', 'no cost in Excel -> blank');
+  assert.ok(ss.sheets.history.formats.some(f => f[1] === 1 && f[4] === '@'), 'date column stored as text');
+  const check = ss.sheets.history_check.data.map(r => r.join('|')).join('\n');
+  assert.match(check, /2026-07\|245000\|/, 'overlap month compared with the live tab');
+  assert.match(check, /ISEVEN \| DEVICE\|3\|/);
+  assert.match(check, /bad date/);
+});
+
+test('history tab syncs with correct dates and never double counts the overlap', () => {
+  const ss = historyFixture(); const db = new FakeSupabase();
+  const props = { SUPABASE_URL: 'https://x.supabase.co', SUPABASE_SERVICE_ROLE_KEY: 'sb_secret_x', SHEET_NAMES: 'profit, history' };
+  const ctx = makeContext(ss, db, props);
+  ctx.buildHistory();
+  const s = ctx.syncSales();
+  assert.strictEqual(s.sheets.find(x => x.sheet === 'history').invalid, 0);
+  const hist = [...db.tx.values()].filter(r => r.source_sheet === 'history');
+  assert.strictEqual(hist.length, 5);
+  assert.deepStrictEqual(hist.map(r => r.sale_date).sort(), ['2025-08-19', '2025-09-08', '2025-12-01', '2026-01-15', '2026-06-30']);
+  assert.ok(hist.every(r => r.sale_date < '2026-07-01'));
+  assert.strictEqual(hist.find(r => r.sale_date === '2026-01-15').category, 'ACCESSORIES');
+  assert.strictEqual(hist[0].cost, null);
+  assert.strictEqual(ctx.syncSales().sheets.find(x => x.sheet === 'history').upserted, 0, 'idempotent');
+});
+
+test('buildHistory refuses to rebuild over an already-synced history tab', () => {
+  const ss = historyFixture(); const db = new FakeSupabase();
+  const ctx = makeContext(ss, db, { SUPABASE_URL: 'https://x.supabase.co', SUPABASE_SERVICE_ROLE_KEY: 'sb_secret_x', SHEET_NAMES: 'profit, history' });
+  ctx.buildHistory(); ctx.syncSales();
+  assert.throws(() => ctx.buildHistory(), /double-count/);
+});
+
+test('buildHistory explains missing columns', () => {
+  const ss = historyFixture();
+  ss.sheets.excel_raw.data[0] = ss.sheets.excel_raw.data[0].map(h => (h === 'TOTAL' ? 'GRAND' : h));
+  const ctx = makeContext(ss, new FakeSupabase(), { SUPABASE_URL: 'https://x.supabase.co', SUPABASE_SERVICE_ROLE_KEY: 'sb_secret_x' });
+  assert.throws(() => ctx.buildHistory(), /Could not find column\(s\) for: Revenue. Headers found/);
 });
 
 console.log(`\n${passed} Apps Script tests passed`);
