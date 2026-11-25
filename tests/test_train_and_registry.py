@@ -66,3 +66,28 @@ def test_not_enough_history(sample_csv: Path, tmp_path: Path) -> None:
     s = Settings(_env_file=None, data_source="csv", local_data_path=short)
     with pytest.raises(DataError, match="at least"):
         run_training(s, output_dir=tmp_path, upload=False)
+
+
+def test_units_model_and_weekly_accuracy(sample_csv: Path, tmp_path: Path) -> None:
+    s = Settings(_env_file=None, data_source="csv", local_data_path=sample_csv, target_metric="units")
+    r = run_training(s, output_dir=tmp_path, upload=False)
+    assert r.model_version.startswith("units-")
+    for res in (r.metrics, r.baseline_metrics):
+        assert res["weekly"]["n"] > 0 and 0 <= res["weekly"]["wape"] < 1
+    # weekly totals are much more accurate than single days
+    assert r.metrics["weekly"]["wape"] < r.metrics["wape"]
+    assert r.metrics["wape"] < r.baseline_metrics["wape"]
+
+
+def test_weekly_metrics_uses_only_complete_weeks() -> None:
+    import pandas as pd
+
+    from ml.train import weekly_metrics
+
+    rows = []
+    for origin, n in (("2026-01-01", 7), ("2026-01-08", 3)):  # second window is incomplete
+        for step in range(1, n + 1):
+            rows.append({"origin": origin, "location": "A", "category": "X", "step": step,
+                         "y_true": 10.0, "y_pred": 12.0})
+    m = weekly_metrics(pd.DataFrame(rows))
+    assert m is not None and m["n"] == 1 and abs(m["wape"] - 0.2) < 1e-9

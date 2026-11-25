@@ -354,7 +354,13 @@ as $$
   );
 $$;
 
-create or replace function public.dashboard_data(p_days_back integer default 120)
+-- v2 adds p_target ('revenue' | 'units'); drop the v1 signature so calls are unambiguous.
+drop function if exists public.dashboard_data(integer);
+
+create or replace function public.dashboard_data(
+  p_days_back integer default 120,
+  p_target    text    default null      -- null = revenue (or whatever has a production model)
+)
 returns jsonb
 language plpgsql
 stable
@@ -370,20 +376,26 @@ begin
     raise exception 'This account is not allowed to view the dashboard' using errcode = '42501';
   end if;
 
-  select target_metric into v_target
-    from model_registry where status = 'production'
-   order by promoted_at desc nulls last limit 1;
-  v_target := coalesce(v_target, 'revenue');
+  if p_target is not null and p_target not in ('revenue', 'profit', 'units') then
+    raise exception 'p_target must be revenue, profit or units' using errcode = '22023';
+  end if;
+  v_target := coalesce(p_target,
+    (select target_metric from model_registry where status = 'production'
+      order by (target_metric = 'revenue') desc, promoted_at desc nulls last limit 1),
+    'revenue');
 
   return jsonb_build_object(
     'today', v_today,
     'target_metric', v_target,
+    'available_targets', coalesce((
+      select jsonb_agg(distinct target_metric) from model_registry where status = 'production'), '[]'::jsonb),
     'last_sync', (select max(updated_at) from sales_transactions),
     'latest_sale_date', (select max(sale_date) from sales_transactions where deleted_at is null),
     'model', (
       select jsonb_build_object(
         'model_version', model_version, 'trained_at', trained_at, 'promoted_at', promoted_at,
-        'data_end', data_end, 'wape', metrics -> 'wape', 'baseline_wape', baseline_metrics -> 'wape')
+        'data_end', data_end, 'wape', metrics -> 'wape', 'baseline_wape', baseline_metrics -> 'wape',
+        'weekly_wape', metrics -> 'weekly' -> 'wape', 'weekly_baseline_wape', baseline_metrics -> 'weekly' -> 'wape')
         from model_registry where status = 'production' and target_metric = v_target
        order by promoted_at desc nulls last limit 1),
     'actuals', coalesce((
@@ -405,9 +417,9 @@ $$;
 
 revoke all on public.dashboard_viewers from anon, authenticated;
 revoke execute on function public.is_dashboard_viewer()          from public, anon;
-revoke execute on function public.dashboard_data(integer)        from public, anon;
+revoke execute on function public.dashboard_data(integer, text)  from public, anon;
 grant  execute on function public.is_dashboard_viewer()          to authenticated;
-grant  execute on function public.dashboard_data(integer)        to authenticated;
+grant  execute on function public.dashboard_data(integer, text)  to authenticated;
 
 -- -----------------------------------------------------------------------------
 -- Storage bucket for model artifacts (private; service_role bypasses storage RLS)

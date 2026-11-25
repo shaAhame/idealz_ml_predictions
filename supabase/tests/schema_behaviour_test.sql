@@ -104,6 +104,11 @@ declare d jsonb;
 begin
   d := dashboard_data(30);
   assert d->>'target_metric' = 'revenue', 'target';
+  assert d->'available_targets' = '["revenue"]'::jsonb, 'available targets';
+  d := dashboard_data(30, 'units');
+  assert d->>'target_metric' = 'units' and d->'model' = 'null'::jsonb, 'units without a model';
+  begin perform dashboard_data(30, 'nonsense'); raise exception 'bad target accepted'; exception when invalid_parameter_value then null; end;
+  d := dashboard_data(30);
   assert jsonb_typeof(d->'actuals') = 'array' and jsonb_typeof(d->'forecasts') = 'array', 'arrays';
   assert (d->'model'->>'model_version') = 'v2', 'production model';
 end $$;

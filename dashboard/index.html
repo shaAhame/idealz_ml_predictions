@@ -59,6 +59,11 @@
   .filters label { display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: var(--text-secondary); flex: 1 1 140px; max-width: 260px; }
   .filters select { background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; min-height: 40px; }
 
+  /* target switch */
+  .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 10px; padding: 3px; background: var(--surface-2); margin: 0 0 12px; }
+  .seg button { border: 0; background: transparent; padding: 8px 14px; border-radius: 8px; font-size: 14px; color: var(--text-secondary); min-height: 36px; }
+  .seg button[aria-pressed="true"] { background: var(--surface-1); color: var(--text-primary); font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,.12); }
+
   /* KPI tiles */
   .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 14px; }
   @media (max-width: 520px) { .kpi { padding: 12px; } .kpi .value { font-size: 22px; } .kpi .note { font-size: 12px; } }
@@ -144,6 +149,11 @@
     <button class="linkbtn" id="signout" type="button">Sign out</button>
   </div>
 
+  <div class="seg" id="target-switch" role="group" aria-label="What to forecast" hidden>
+    <button type="button" data-target="revenue" aria-pressed="true">Revenue</button>
+    <button type="button" data-target="units" aria-pressed="false">Items sold</button>
+  </div>
+
   <div class="filters" id="filters">
     <label>Location <select id="f-location"></select></label>
     <label>Category <select id="f-category"></select></label>
@@ -171,7 +181,7 @@
 
   <div class="card section" id="split-card">
     <h2 id="split-title">Next 7 days by category</h2>
-    <div class="sub">Forecast total for each group</div>
+    <div class="sub" id="split-sub">Forecast total for each group</div>
     <div class="bars" id="split"></div>
   </div>
 
@@ -201,6 +211,10 @@
   const KEY = CFG.publishableKey || "";
   const SESSION_KEY = "idealz-dashboard-session";
   const FILTER_KEY = "idealz-dashboard-filters";
+  const TARGET_KEY = "idealz-dashboard-target";
+  let TARGET = store_get_target();
+  let LEGACY = false;  // database still has the v1 dashboard_data(p_days_back) only
+  function store_get_target() { try { return localStorage.getItem("idealz-dashboard-target") === "units" ? "units" : "revenue"; } catch { return "revenue"; } }
   const DAYS_BACK = 120, TREND_DAYS = 56;
 
   const $ = (id) => document.getElementById(id);
@@ -246,10 +260,11 @@
     const r = await fetch(`${API}/rest/v1/rpc/dashboard_data`, {
       method: "POST",
       headers: { apikey: KEY, Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ p_days_back: DAYS_BACK }),
+      body: JSON.stringify(LEGACY ? { p_days_back: DAYS_BACK } : { p_days_back: DAYS_BACK, p_target: TARGET }),
     });
     if (r.status === 401 && !retried) return loadData(true);
     const j = await r.json().catch(() => ({}));
+    if (!r.ok && j.code === "PGRST202" && !LEGACY) { LEGACY = true; return loadData(retried); }  // old SQL function
     if (!r.ok) {
       if (j.code === "42501" || r.status === 403) throw new NotAllowed(j.message || "Not allowed");
       throw new Error(j.message || `Could not load data (HTTP ${r.status})`);
@@ -263,9 +278,15 @@
   let METRIC = "revenue";
   const nf0 = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
   const nfc = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 });
-  const money = (v) => (METRIC === "units" ? "" : "Rs ");
-  const fmt = (v) => (v == null || !isFinite(v) ? "—" : money(v) + nf0.format(Math.round(v)));
-  const fmtC = (v) => (v == null || !isFinite(v) ? "—" : money(v) + nfc.format(v));
+  const nf1 = new Intl.NumberFormat("en-US", { maximumFractionDigits: 1 });
+  const isUnits = () => METRIC === "units";
+  const fmt = (v) => {
+    if (v == null || !isFinite(v)) return "—";
+    if (isUnits()) return (Math.abs(v) < 10 ? nf1.format(v) : nf0.format(Math.round(v)));
+    return "Rs " + nf0.format(Math.round(v));
+  };
+  const fmtC = (v) => (v == null || !isFinite(v) ? "—" : (isUnits() ? nfc.format(v) : "Rs " + nfc.format(v)));
+  const fmtKpi = (v) => (v == null || !isFinite(v) ? "—" : (isUnits() ? `~${nf0.format(Math.round(v))} items` : fmtC(v)));
   const DAY = 86400000;
   const iso = (d) => d.toISOString().slice(0, 10);
   const parse = (s) => new Date(s + "T00:00:00Z");
@@ -343,21 +364,23 @@
     const next14 = sumRange(fc, today, addDays(today, 13));
     const last7 = sumRange(act, addDays(today, -7), addDays(today, -1)) || 0;
     const prev7 = sumRange(act, addDays(today, -14), addDays(today, -8)) || 0;
-    setKpi("kpi-next7", fmtC(next7), next7 == null ? "No forecast yet" : `${shortDate(today)} – ${shortDate(addDays(today, 6))}`);
-    setKpi("kpi-next14", fmtC(next14), next14 == null ? "No forecast yet" : `through ${shortDate(addDays(today, 13))}`);
+    setKpi("kpi-next7", fmtKpi(next7), next7 == null ? "No forecast yet" : `${shortDate(today)} – ${shortDate(addDays(today, 6))}`);
+    setKpi("kpi-next14", fmtKpi(next14), next14 == null ? "No forecast yet" : `through ${shortDate(addDays(today, 13))}`);
     let note = "vs previous 7 days: no data";
     if (prev7 > 0) {
       const ch = (last7 - prev7) / prev7;
       note = `${ch >= 0 ? "▲" : "▼"} ${Math.abs(ch * 100).toFixed(0)}% vs previous 7 days`;
     }
-    setKpi("kpi-last7", fmtC(last7), note);
+    setKpi("kpi-last7", fmtKpi(last7), note);
     const m = DATA.model;
     if (m && m.wape != null) {
-      const w = Number(m.wape), b = Number(m.baseline_wape);
-      const better = isFinite(b) && b > 0 ? `, ${Math.round((1 - w / b) * 100)}% better than "same as last week"` : "";
-      setKpi("kpi-accuracy", `±${Math.round(w * 100)}%`, `Typical daily error per category (all locations)${better}`);
+      const w = Number(m.wape), b = Number(m.baseline_wape), ww = Number(m.weekly_wape);
+      const parts = [];
+      if (isFinite(ww)) parts.push(`7-day totals: ±${Math.round(ww * 100)}%`);
+      if (isFinite(b) && b > 0) parts.push(`${Math.round((1 - w / b) * 100)}% better than "same as last week"`);
+      setKpi("kpi-accuracy", `±${Math.round(w * 100)}% daily`, `Typical error per shop & category. ${parts.join(" · ")}`);
     } else {
-      setKpi("kpi-accuracy", "—", "No production model yet");
+      setKpi("kpi-accuracy", "—", isUnits() ? "No items-sold model yet: it appears after the next training run" : "No production model yet");
     }
   }
 
@@ -481,7 +504,8 @@
     const to = addDays(today, 6);
     const multiLoc = new Set(DATA.forecasts.filter(keep).map((r) => r.location)).size > 1;
     const groupOf = (r) => (filters.category ? r.location : multiLoc ? `${r.category} · ${r.location}` : r.category);
-    $("split-title").textContent = filters.category ? "Next 7 days by location" : "Next 7 days by category";
+    $("split-title").textContent = filters.category ? "Next 7 days by location" : "Next 7 days by shop & category";
+    $("split-sub").textContent = isUnits() ? "Forecast items sold in each group (for stock ordering)" : "Forecast total for each group";
     const g = new Map();
     for (const r of DATA.forecasts) if (keep(r) && r.d >= today && r.d <= to) g.set(groupOf(r), (g.get(groupOf(r)) || 0) + Number(r.value));
     const rows = [...g.entries()].sort((a, b) => b[1] - a[1]);
@@ -493,7 +517,8 @@
       const fill = el("div", { class: "bar-fill", title: `${name}: ${fmt(v)}` });
       fill.style.width = `${Math.max(0.5, (v / max) * 100)}%`;
       track.append(fill);
-      row.append(el("div", { class: "bar-name", title: name }, name), track, el("div", { class: "bar-val" }, fmtC(v)));
+      row.append(el("div", { class: "bar-name", title: name }, name), track,
+                 el("div", { class: "bar-val" }, isUnits() ? `~${nf0.format(Math.round(v))}` : fmtC(v)));
       box.append(row);
     }
   }
@@ -516,7 +541,10 @@
   function renderAll() {
     if (!DATA) return;
     METRIC = DATA.target_metric || "revenue";
-    $("trend-title").textContent = `Daily ${METRIC}`;
+    $("trend-title").textContent = isUnits() ? "Items sold per day" : `Daily ${METRIC}`;
+    for (const b of document.querySelectorAll("#target-switch button")) b.setAttribute("aria-pressed", String(b.dataset.target === METRIC));
+    const avail = DATA.available_targets || [];
+    $("target-switch").hidden = LEGACY || (avail.length < 2 && METRIC === "revenue");
     const today = DATA.today;
     const act = sumByDate(DATA.actuals), fc = sumByDate(DATA.forecasts);
     renderStatus();
@@ -579,6 +607,16 @@
     }
     show("login-view");
   });
+
+  for (const b of document.querySelectorAll("#target-switch button")) {
+    b.addEventListener("click", () => {
+      if (b.dataset.target === TARGET) return;
+      TARGET = b.dataset.target;
+      try { localStorage.setItem(TARGET_KEY, TARGET); } catch { /* ignore */ }
+      for (const x of document.querySelectorAll("#target-switch button")) x.setAttribute("aria-pressed", String(x === b));
+      refresh();
+    });
+  }
 
   for (const [id, key] of [["f-location", "location"], ["f-category", "category"]]) {
     $(id).addEventListener("change", (e) => { filters[key] = e.target.value; store.set(FILTER_KEY, filters); renderAll(); });

@@ -6,7 +6,11 @@
 #   RENDER_DEPLOY_HOOK_URL   Render > service > Settings > Deploy Hook
 #   API_BASE_URL             e.g. https://sales-forecast-api.onrender.com (used to verify the rollout)
 #   API_ADMIN_TOKEN          same value as the service's ADMIN_TOKEN (hot reload without redeploy)
-# Optional repository variables: TARGET_METRIC, FORECAST_HORIZON, BUSINESS_TZ, HOLIDAY_COUNTRY
+# Optional repository variables: FORECAST_HORIZON, BUSINESS_TZ, HOLIDAY_COUNTRY
+#
+# Two models are trained and forecast on every run: revenue (money) and units
+# (items sold = line items; for DEVICE that is phones sold). Each has its own
+# production model and promotion gate. The API serves the revenue model.
 
 name: ml-pipeline
 
@@ -39,7 +43,6 @@ env:
   SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
   SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
   DATA_SOURCE: supabase
-  TARGET_METRIC: ${{ vars.TARGET_METRIC || 'revenue' }}
   FORECAST_HORIZON: ${{ vars.FORECAST_HORIZON || '14' }}
   BUSINESS_TZ: ${{ vars.BUSINESS_TZ || 'Asia/Colombo' }}
   HOLIDAY_COUNTRY: ${{ vars.HOLIDAY_COUNTRY || 'LK' }}
@@ -70,8 +73,9 @@ jobs:
     timeout-minutes: 30
     environment: production
     outputs:
-      promoted: ${{ steps.train.outputs.promoted }}
-      model_version: ${{ steps.train.outputs.model_version }}
+      # The API serves the revenue model, so only its promotion triggers a rollout.
+      promoted: ${{ steps.train_revenue.outputs.promoted }}
+      model_version: ${{ steps.train_revenue.outputs.model_version }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -80,14 +84,21 @@ jobs:
           cache: pip
           cache-dependency-path: requirements.txt
       - run: pip install -r requirements.txt
-      - name: Train, evaluate, gate, register
-        id: train
+      - name: Train, evaluate, gate, register (revenue)
+        id: train_revenue
+        env:
+          TARGET_METRIC: revenue
+        run: python -m ml.train --promote "${{ inputs.promote || 'auto' }}" --output-dir artifacts
+      - name: Train, evaluate, gate, register (items sold)
+        id: train_units
+        env:
+          TARGET_METRIC: units
         run: python -m ml.train --promote "${{ inputs.promote || 'auto' }}" --output-dir artifacts
       - name: Upload model artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: model-${{ steps.train.outputs.model_version || github.run_id }}
+          name: models-${{ github.run_id }}
           path: artifacts/
           retention-days: 30
           if-no-files-found: warn
@@ -110,12 +121,29 @@ jobs:
           cache: pip
           cache-dependency-path: requirements.txt
       - run: pip install -r requirements.txt
-      - name: Generate forecasts and upsert into sales_forecasts
-        run: python -m ml.predict_batch --out forecasts.csv
+      - name: Generate forecasts and upsert into sales_forecasts (revenue)
+        env:
+          TARGET_METRIC: revenue
+        run: python -m ml.predict_batch --out forecasts_revenue.csv
+      - name: Generate forecasts and upsert into sales_forecasts (items sold)
+        # Until the first units model is promoted there is nothing to forecast with; don't fail the run.
+        env:
+          TARGET_METRIC: units
+        run: |
+          set +e
+          python -m ml.predict_batch --out forecasts_units.csv
+          code=$?
+          if [ "$code" = "3" ]; then
+            echo "::warning::Items-sold forecast skipped: no items-sold model promoted yet."
+            exit 0
+          fi
+          exit $code
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: forecasts-${{ github.run_id }}
-          path: forecasts.csv
+          path: forecasts_*.csv
+          if-no-files-found: warn
           retention-days: 14
 
   deploy:

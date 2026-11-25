@@ -6,6 +6,8 @@ overwrites, it never duplicates).
     python -m ml.predict_batch --dry-run --out forecasts.csv
     MODEL_SOURCE=local MODEL_PATH=artifacts/latest/model.joblib python -m ml.predict_batch --dry-run
 
+Exit codes: 0 ok, 2 data problem (stale/missing), 3 no usable model for TARGET_METRIC.
+
 Forecasts start TODAY (business timezone): today's sales are still incomplete,
 so history ends yesterday and today is forecast step 1.
 """
@@ -26,7 +28,7 @@ from ml.data_loader import SERIES_KEYS, DataError, check_freshness, load_daily_s
 from ml.features import build_panel
 from ml.forecasting import recursive_forecast
 from ml.logging_utils import configure_logging
-from ml.registry import ModelBundle, load_serving_bundle, utc_now
+from ml.registry import ModelBundle, ModelLoadError, load_serving_bundle, utc_now
 from ml.supabase_client import client_from_settings
 
 log = logging.getLogger("ml.predict_batch")
@@ -98,6 +100,10 @@ def main(argv: list[str] | None = None) -> int:
     run_id = str(uuid.uuid4())
     try:
         bundle = load_serving_bundle(settings)
+    except ModelLoadError as exc:
+        log.error("batch forecast aborted: %s", exc)
+        return 3  # no usable model (e.g. none promoted yet for this target)
+    try:
         cutoff = settings.cutoff_date(args.as_of)
         start = history_window_start(settings, bundle, cutoff)
         daily = load_daily_sales(settings, start=start, end=cutoff)

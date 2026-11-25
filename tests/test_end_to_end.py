@@ -91,3 +91,13 @@ def test_corrupted_storage_object_blocks_startup(fake: FakeSupabase, tmp_path: P
 
     with pytest.raises(ModelLoadError, match="SHA-256"), TestClient(app):
         pass
+
+
+def test_batch_forecast_without_promoted_model_exits_3(fake: FakeSupabase, env: pytest.MonkeyPatch) -> None:
+    """The pipeline tolerates exit code 3 (no model yet for a target) but not other failures."""
+    from ml import predict_batch
+
+    env.setenv("TARGET_METRIC", "units")
+    get_settings.cache_clear()
+    assert predict_batch.main(["--dry-run"]) == 3
+    assert not fake.forecasts

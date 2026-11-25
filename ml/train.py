@@ -107,6 +107,18 @@ def evaluate_gate(
     return GateDecision(True, f"WAPE {wape:.4f} vs baseline {base:.4f}; no production model yet")
 
 
+def weekly_metrics(bt: pd.DataFrame) -> dict[str, float] | None:
+    """Accuracy of 7-day TOTALS per series: for every backtest origin, sum the first
+    7 forecast days and compare with the actual 7-day total (what weekly planning uses)."""
+    wk = bt.loc[bt["step"] <= 7]
+    sums = wk.groupby(["origin", *SERIES_KEYS], observed=True).agg(
+        y_true=("y_true", "sum"), y_pred=("y_pred", "sum"), days=("step", "size"))
+    sums = sums.loc[sums["days"] == 7]
+    if sums.empty:
+        return None
+    return regression_metrics(sums["y_true"], sums["y_pred"])
+
+
 def _horizon_bucket(step: pd.Series) -> pd.Series:
     return ((step - 1) // 7 * 7 + 1).astype(int).astype(str) + "-" + ((step - 1) // 7 * 7 + 7).astype(int).astype(str)
 
@@ -169,6 +181,11 @@ def run_training(
         metrics["by_horizon"] = metrics_by(bt.assign(h=_horizon_bucket(bt["step"])), "h")
         metrics["by_category"] = metrics_by(bt, "category")
         metrics["best_iteration"] = best_iter
+        weekly, weekly_base = weekly_metrics(bt), weekly_metrics(bt_base)
+        if weekly:
+            metrics["weekly"] = weekly
+        if weekly_base:
+            baseline["weekly"] = weekly_base
 
         # ---------------- gate ----------------
         registry = ModelRegistry(client, settings.model_bucket) if (upload and client) else None
@@ -234,6 +251,8 @@ def run_training(
         log.info("training finished", extra={
             "model_version": version, "wape": round(metrics["wape"], 4), "baseline_wape": round(baseline["wape"], 4),
             "mae": round(metrics["mae"], 2), "rmse": round(metrics["rmse"], 2), "mape": round(metrics["mape"], 4),
+            "weekly_wape": round(metrics["weekly"]["wape"], 4) if "weekly" in metrics else None,
+            "target": target,
             "promote_candidate": decision.promote, "promoted": promoted, "reason": decision.reason,
             "artifact": str(model_path), "duration_s": round(time.monotonic() - t0, 1)})
         _write_github_outputs(result)
@@ -261,6 +280,8 @@ def _write_github_outputs(r: TrainResult) -> None:
             f.write(f"## Training run `{r.model_version}`\n\n| metric | model | seasonal naive |\n|---|---|---|\n")
             for k in ("wape", "mae", "rmse", "mape", "bias"):
                 f.write(f"| {k} | {m[k]:.4f} | {b[k]:.4f} |\n")
+            if "weekly" in m and "weekly" in b:
+                f.write(f"| weekly wape (7-day totals) | {m['weekly']['wape']:.4f} | {b['weekly']['wape']:.4f} |\n")
             f.write(f"\n**Promoted:** {r.promoted} — {r.decision.reason}\n")
 
 
