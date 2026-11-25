@@ -102,7 +102,7 @@ function makeContext(ss, db, props) {
   const ctx = {
     console: { log: m => logs.push(m), warn: m => logs.push('WARN ' + m), error: m => logs.push('ERR ' + m) },
     SpreadsheetApp: { getActive: () => ss, flush: () => {}, getUi: () => ({}) },
-    PropertiesService: { getScriptProperties: () => ({ getProperty: k => (k in props ? props[k] : null) }) },
+    PropertiesService: { getScriptProperties: () => ({ getProperty: k => { ctx.__propReads = (ctx.__propReads || 0) + 1; return k in props ? props[k] : null; } }) },
     Session: { getScriptTimeZone: () => (props.__scriptTz === undefined ? 'Asia/Colombo' : props.__scriptTz) },
     LockService: { getScriptLock: () => ({ tryLock: () => true, releaseLock: () => {} }) },
     UrlFetchApp: { fetch: (url, opts) => db.handle(url, opts) },
@@ -378,11 +378,24 @@ test('history tab syncs with correct dates and never double counts the overlap',
   assert.strictEqual(ctx.syncSales().sheets.find(x => x.sheet === 'history').upserted, 0, 'idempotent');
 });
 
-test('buildHistory refuses to rebuild over an already-synced history tab', () => {
+test('buildHistory can be re-run until synced, then refuses', () => {
   const ss = historyFixture(); const db = new FakeSupabase();
   const ctx = makeContext(ss, db, { SUPABASE_URL: 'https://x.supabase.co', SUPABASE_SERVICE_ROLE_KEY: 'sb_secret_x', SHEET_NAMES: 'profit, history' });
-  ctx.buildHistory(); ctx.syncSales();
+  ctx.buildHistory();
+  assert.strictEqual(ctx.buildHistory().kept, 5, 'unsynced history tab (e.g. after a timeout) can be rebuilt');
+  ctx.syncSales();
   assert.throws(() => ctx.buildHistory(), /double-count/);
+});
+
+test('buildHistory reads script settings a constant number of times, not per row', () => {
+  const ss = historyFixture();
+  const many = [];
+  for (let i = 0; i < 3000; i++) many.push(sampleRows()[i % 8].map((v, j) => (j === 0 ? d(2026, 7, 1 + (i % 28)) : v)));
+  ss.sheets.profit = new FakeSheet('profit', [HEADER.slice(), ...many]);
+  const ctx = makeContext(ss, new FakeSupabase(), { SUPABASE_URL: 'https://x.supabase.co', SUPABASE_SERVICE_ROLE_KEY: 'sb_secret_x', SHEET_NAMES: 'profit' });
+  ctx.__propReads = 0;
+  ctx.buildHistory();
+  assert.ok(ctx.__propReads < 50, `PropertiesService read ${ctx.__propReads} times`);
 });
 
 test('buildHistory explains missing columns', () => {

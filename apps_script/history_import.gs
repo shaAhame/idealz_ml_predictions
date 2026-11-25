@@ -55,11 +55,12 @@ function buildHistory() {
   if (!raw) throw new Error('Tab "' + HISTORY.RAW_SHEET + '" not found. Import the Excel file and rename its tab to ' + HISTORY.RAW_SHEET + '.');
 
   var existing = ss.getSheetByName(HISTORY.OUT_SHEET);
-  if (existing && existing.getLastRow() > 1) {
-    throw new Error('Tab "' + HISTORY.OUT_SHEET + '" already has data. Rebuilding would give every row a new id and ' +
-      'double-count sales in Supabase. If you really need to rebuild: delete the "' + HISTORY.OUT_SHEET +
+  if (existing && historyAlreadySynced_(existing)) {
+    throw new Error('Tab "' + HISTORY.OUT_SHEET + '" has already been synced to Supabase. Rebuilding would give every row a new id and ' +
+      'double-count sales. If you really need to rebuild: delete the "' + HISTORY.OUT_SHEET +
       '" tab, run buildHistory, then run syncSales AND reconcileSales once.');
   }
+  var started = Date.now();
 
   var tz = sheetTimeZone_();
   var lastRow = raw.getLastRow(), lastCol = raw.getLastColumn();
@@ -95,6 +96,10 @@ function buildHistory() {
   }
 
   for (var r = 0; r < values.length; r++) {
+    if (r % 2000 === 0 && Date.now() - started > 4.5 * 60 * 1000) {
+      throw new Error('Stopped after 4.5 minutes at excel_raw row ' + (r + 2) + ' of ' + (values.length + 1) +
+        '. Nothing was synced. Send this message to whoever set this up.');
+    }
     var row = values[r];
     var sheetRow = r + 2;
     var blank = HISTORY_REQUIRED.every(function (k) { var v = row[idx[k]]; return v === '' || v === null; });
@@ -102,7 +107,7 @@ function buildHistory() {
     s.raw++;
 
     var date, total;
-    try { date = toIsoDate_(row[idx['Date']], tz, HISTORY.RAW_DATE_ORDER); }
+    try { date = cachedIsoDate_(row[idx['Date']], tz); }
     catch (e) { s.invalid++; problem(sheetRow, 'bad date: ' + e.message, row[idx['Date']]); continue; }
     try { total = toNumber_(row[idx['Revenue']]); }
     catch (e2) { s.invalid++; problem(sheetRow, 'bad TOTAL: ' + e2.message, row[idx['Revenue']]); continue; }
@@ -177,11 +182,29 @@ function buildHistory() {
   return s;
 }
 
+var DATE_CACHE_ = {};
+function cachedIsoDate_(v, tz) {
+  var key = Object.prototype.toString.call(v) === '[object Date]' ? 'd' + v.getTime() : 's' + String(v);
+  if (!(key in DATE_CACHE_)) DATE_CACHE_[key] = toIsoDate_(v, tz, HISTORY.RAW_DATE_ORDER);
+  return DATE_CACHE_[key];
+}
+
+/** True once syncSales has assigned row ids in the history tab (safe to rebuild before that). */
+function historyAlreadySynced_(sheet) {
+  var lastRow = sheet.getLastRow(), lastCol = sheet.getLastColumn();
+  if (lastRow < 2 || lastCol < 1) return false;
+  var headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(normHeader_);
+  var c = headers.indexOf(ROW_ID_HEADER);
+  if (c < 0) return false;
+  return sheet.getRange(2, c + 1, lastRow - 1, 1).getValues().some(function (r) { return String(r[0]).trim() !== ''; });
+}
+
 /** Revenue per month in the live tab(s) from SHEET_NAMES (excluding history), for the overlap check. */
 function liveMonthlyRevenue_(tz) {
   var res = {};
-  var names;
-  try { names = getConfig_().sheetNames; } catch (e) { names = ['profit']; }
+  var names, dateOrder;
+  try { var cfg = getConfig_(); names = cfg.sheetNames; dateOrder = cfg.dateOrder; }   // read settings ONCE
+  catch (e) { names = ['profit']; dateOrder = 'DMY'; }
   names.filter(function (n) { return n !== HISTORY.OUT_SHEET; }).forEach(function (name) {
     var sh = SpreadsheetApp.getActive().getSheetByName(name);
     if (!sh || sh.getLastRow() < 2) return;
@@ -191,17 +214,13 @@ function liveMonthlyRevenue_(tz) {
     var vals = sh.getRange(2, 1, sh.getLastRow() - 1, sh.getLastColumn()).getValues();
     vals.forEach(function (row) {
       if (isBlankRow_(row, colIndex)) return;
-      var c = cleanRow_(row, colIndex, tz, getStringDateOrder_());
+      var c = cleanRow_(row, colIndex, tz, dateOrder);
       if (c.errors.length) return;
       var m = c.record.sale_date.slice(0, 7);
       res[m] = (res[m] || 0) + c.record.revenue;
     });
   });
   return res;
-}
-
-function getStringDateOrder_() {
-  try { return getConfig_().dateOrder; } catch (e) { return 'DMY'; }
 }
 
 function writeHistoryCheck_(s, byMonth, byGroup, overlapMonth, live, problems, havePayments) {
