@@ -193,6 +193,8 @@ def run_training(
         # ---------------- data ----------------
         daily = load_daily_sales(settings, start=start, end=cutoff, client=client)
         newest = check_freshness(daily, cutoff, settings.stale_data_days)
+        # Days after the newest sale are "not entered yet", not zero-sales days.
+        cutoff = min(cutoff, newest)
         panel = build_panel(daily, target, cutoff)
         n_days = int(panel["sale_date"].nunique())
         min_days = settings.validation_days + settings.early_stopping_days + cfg.lookback_days() + 28

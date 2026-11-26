@@ -96,6 +96,9 @@ declare l jsonb;
 begin
   assert (select count(*) from forecast_snapshots where horizon_days = 1) = 20, 'horizon computed';
   assert not exists (select 1 from v_forecast_accuracy where forecast_date >= (now() at time zone 'Asia/Colombo')::date), 'only past days';
+  assert not exists (select 1 from v_forecast_accuracy
+                      where forecast_date > (select max(sale_date) from sales_transactions where deleted_at is null)),
+         'only days whose sales are entered';
   l := live_accuracy('revenue', 28);
   assert (l->>'next_day_days')::int = 20, 'next-day days ' || l;
   assert (l->>'next_day_wape')::numeric = 2.0, 'forecast 3000 vs actual 1000 -> 200% error';

@@ -137,3 +137,27 @@ def test_forecast_ranges_are_calibrated(trained) -> None:
     low, high = apply_range(1000.0, q["d7"])
     assert 0 <= low < high
     assert apply_range(1000.0, None) == (None, None)
+
+
+def test_days_not_entered_yet_are_not_zero_sales(sample_csv: Path, tmp_path: Path) -> None:
+    """If the sheet's last 2 days are missing, training stops at the newest sale and
+    forecasts start at the first missing day, still reaching today + 13."""
+    import datetime as dt
+
+    from ml.predict_batch import generate_forecasts
+    from ml.registry import load_bundle
+
+    short = tmp_path / "late.csv"
+    df = pd.read_csv(sample_csv)
+    newest = sorted(df["Date"].unique())[-3]
+    df[df["Date"] <= newest].to_csv(short, index=False)
+    s = Settings(_env_file=None, data_source="csv", local_data_path=short, validation_days=56)
+    r = run_training(s, output_dir=tmp_path / "a", upload=False)
+    b = load_bundle(r.artifact_dir / "model.joblib")
+    assert b.data_end == newest and r.metrics["test"]["last_day"] == newest
+
+    from ml.data_loader import load_daily_sales
+
+    fc = generate_forecasts(s, b, load_daily_sales(s))
+    assert fc["sale_date"].min().date() == dt.date.fromisoformat(newest) + dt.timedelta(days=1)
+    assert fc["sale_date"].max().date() == s.today() + dt.timedelta(days=13)

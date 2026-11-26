@@ -107,9 +107,9 @@ class ForecastService:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
                                 f"horizon {req.horizon} exceeds MAX_HORIZON={s.max_horizon}")
         bundle = self.bundle
-        cutoff = s.cutoff_date()
-        hist = self.history(cutoff)
-        check_freshness(hist.daily, cutoff, s.stale_data_days)
+        hist = self.history(s.cutoff_date())
+        newest = check_freshness(hist.daily, s.cutoff_date(), s.stale_data_days)
+        cutoff = min(s.cutoff_date(), newest)  # days not entered yet are not zero-sales days
         panel = build_panel(hist.daily, bundle.target_metric, cutoff, start_date=hist.window_start)
 
         unknown: list[SeriesRef] = []

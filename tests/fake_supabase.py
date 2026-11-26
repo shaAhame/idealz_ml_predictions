@@ -91,9 +91,10 @@ class FakeSupabase:
     def _accuracy_rows(self) -> list[dict[str, Any]]:
         actual = {(d["sale_date"], d["location"], d["category"]): d for d in self.daily}
         today = self.today or pd.Timestamp.now(tz="Asia/Colombo").date().isoformat()
+        last_sale = max((d["sale_date"] for d in self.daily), default="")
         out = []
         for r in self.snapshots.values():
-            if r["forecast_date"] >= today:
+            if r["forecast_date"] >= today or r["forecast_date"] > last_sale:
                 continue
             a = actual.get((r["forecast_date"], r["location"], r["category"]), {})
             horizon = (pd.Timestamp(r["forecast_date"]) - pd.Timestamp(r["issue_date"])).days + 1

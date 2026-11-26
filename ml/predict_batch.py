@@ -62,14 +62,18 @@ def generate_forecasts(
 ) -> pd.DataFrame:
     """`window_start`: first date of `daily` when only a recent window was loaded."""
     cfg = bundle.fcfg
-    cutoff = settings.cutoff_date(as_of)
-    check_freshness(daily, cutoff, settings.stale_data_days)
+    yesterday = settings.cutoff_date(as_of)
+    newest = check_freshness(daily, yesterday, settings.stale_data_days)
+    # If the latest days are not in the sheet yet, forecast from the first missing day
+    # instead of treating those days as zero sales; still cover through today + horizon.
+    cutoff = min(yesterday, newest)
     panel = build_panel(daily, bundle.target_metric, cutoff, start_date=window_start)
     history = active_history(panel, cutoff, settings.inactive_series_days)
     if history.empty:
         raise DataError(f"No active series in the last {settings.inactive_series_days} days.")
     start = cutoff + dt.timedelta(days=1)
-    fc = recursive_forecast(bundle.pipeline, cfg, history, start, horizon or settings.forecast_horizon)
+    lag = (yesterday - cutoff).days
+    fc = recursive_forecast(bundle.pipeline, cfg, history, start, (horizon or settings.forecast_horizon) + lag)
     return fc
 
 

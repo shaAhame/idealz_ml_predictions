@@ -319,7 +319,9 @@ select
 from public.forecast_snapshots s
 left join public.v_daily_sales d
   on d.sale_date = s.forecast_date and d.location = s.location and d.category = s.category
-where s.forecast_date < (now() at time zone 'Asia/Colombo')::date;   -- CUSTOMIZE: business time zone
+where s.forecast_date < (now() at time zone 'Asia/Colombo')::date     -- CUSTOMIZE: business time zone
+  -- only days whose sales have been entered (a day not yet in the sheet is not a zero-sales day)
+  and s.forecast_date <= (select max(sale_date) from public.sales_transactions where deleted_at is null);
 
 -- -----------------------------------------------------------------------------
 -- Row Level Security & grants

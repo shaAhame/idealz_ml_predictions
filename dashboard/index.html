@@ -386,11 +386,18 @@
     c.querySelector(".note").textContent = note || "";
   }
 
+  // Last day whose sales are in the sheet; later days are "not entered yet", not zero.
+  const lastEntered = (today) => {
+    const l = DATA.latest_sale_date;
+    return l && l < today ? l : addDays(today, -1);
+  };
+
   function renderKpis(act, fc, today) {
     const next7 = sumRange(fc, today, addDays(today, 6));
     const next14 = sumRange(fc, today, addDays(today, 13));
-    const last7 = sumRange(act, addDays(today, -7), addDays(today, -1)) || 0;
-    const prev7 = sumRange(act, addDays(today, -14), addDays(today, -8)) || 0;
+    const le = lastEntered(today);
+    const last7 = sumRange(act, addDays(le, -6), le) || 0;
+    const prev7 = sumRange(act, addDays(le, -13), addDays(le, -7)) || 0;
     const r7 = rangeOf(next7, "d7"), r14 = rangeOf(next14, "d14");
     setKpi("kpi-next7", fmtKpi(next7), next7 == null ? "No forecast yet"
       : `${shortDate(today)} – ${shortDate(addDays(today, 6))}${r7 ? ` · likely ${fmtRange(r7, true)}` : ""}`);
@@ -401,7 +408,7 @@
       const ch = (last7 - prev7) / prev7;
       note = `${ch >= 0 ? "▲" : "▼"} ${Math.abs(ch * 100).toFixed(0)}% vs previous 7 days`;
     }
-    setKpi("kpi-last7", fmtKpi(last7), note);
+    setKpi("kpi-last7", fmtKpi(last7), le < addDays(today, -1) ? `${note} · up to ${shortDate(le)}` : note);
     const m = DATA.model;
     if (m && m.wape != null) {
       const w = Number(m.wape), b = Number(m.baseline_wape), ww = Number(m.weekly_wape);
@@ -456,7 +463,7 @@
       const f = fc.has(d) ? fc.get(d) : null;
       return {
         d,
-        a: d < today && firstActual && d >= firstActual ? act.get(d) || 0 : null,  // missing day = no sales
+        a: d <= lastEntered(today) && firstActual && d >= firstActual ? act.get(d) || 0 : null,  // no row = no sales
         f,
         r: f != null && d >= today ? rangeOf(f, dayKind(d, today)) : null,
       };
