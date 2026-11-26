@@ -80,6 +80,29 @@ do $$ begin
   assert (select entity_id from sales_forecasts) = 'ISEVEN|ACCESSORIES';
 end $$;
 
+-- 5b. Snapshots + live accuracy
+insert into sales_transactions (row_id, sale_date, location, category, bill_no, revenue, row_hash)
+select 'live' || g, (now() at time zone 'Asia/Colombo')::date - g, 'ISEVEN', 'DEVICE', 'b' || g, 1000, 'h'
+  from generate_series(1, 20) g;
+insert into forecast_snapshots(issue_date, forecast_date, location, category, target_metric,
+                               predicted_value, predicted_lower, predicted_upper, model_version)
+select i::date, i::date + k, 'ISEVEN', 'DEVICE', 'revenue', 3000, 2000, 4000, 'v2'
+  from generate_series((now() at time zone 'Asia/Colombo')::date - 20, (now() at time zone 'Asia/Colombo')::date - 1, '1 day') i,
+       generate_series(0, 13) k;
+update model_registry set metrics = '{"wape": 0.3, "weekly": {"wape": 0.2}, "by_horizon": {"1-7": {"wape": 0.3}}}'
+ where model_version = 'v2';
+do $$
+declare l jsonb;
+begin
+  assert (select count(*) from forecast_snapshots where horizon_days = 1) = 20, 'horizon computed';
+  assert not exists (select 1 from v_forecast_accuracy where forecast_date >= (now() at time zone 'Asia/Colombo')::date), 'only past days';
+  l := live_accuracy('revenue', 28);
+  assert (l->>'next_day_days')::int = 20, 'next-day days ' || l;
+  assert (l->>'next_day_wape')::numeric = 2.0, 'forecast 3000 vs actual 1000 -> 200% error';
+  assert (l->>'range_coverage')::numeric = 0, 'actual 1000 outside 2000-4000';
+  assert (l->>'week_total_weeks')::int >= 2 and (l->>'alert')::boolean, 'alert raised ' || l;
+end $$;
+
 -- 6. RLS: anon sees nothing, cannot call RPCs; authenticated reads forecasts only
 set local role anon;
 do $$ begin
@@ -92,6 +115,8 @@ do $$ begin
   assert (select count(*) from sales_forecasts) = 1, 'authenticated reads forecasts';
   begin perform 1 from v_daily_sales; raise exception 'auth read daily view'; exception when insufficient_privilege then null; end;
   begin perform 1 from sales_transactions; raise exception 'auth read tx'; exception when insufficient_privilege then null; end;
+  begin perform 1 from forecast_snapshots; raise exception 'auth read snapshots'; exception when insufficient_privilege then null; end;
+  begin perform live_accuracy('revenue', 28); raise exception 'auth called live_accuracy'; exception when insufficient_privilege then null; end;
 end $$;
 reset role;
 
@@ -111,6 +136,7 @@ begin
   d := dashboard_data(30);
   assert jsonb_typeof(d->'actuals') = 'array' and jsonb_typeof(d->'forecasts') = 'array', 'arrays';
   assert (d->'model'->>'model_version') = 'v2', 'production model';
+  assert (d->'live'->>'alert')::boolean, 'dashboard sees the live alert';
 end $$;
 select set_config('request.jwt.claims', '{"email":"stranger@example.com","role":"authenticated"}', true);
 do $$ begin

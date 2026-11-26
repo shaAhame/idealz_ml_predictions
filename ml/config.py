@@ -39,8 +39,13 @@ class Settings(BaseSettings):
     target_metric: TargetMetric = "revenue"  # CUSTOMIZE: revenue | profit | units (line items)
     forecast_horizon: int = Field(default=14, ge=1, le=90)  # CUSTOMIZE: days written by the batch job
     max_horizon: int = Field(default=28, ge=1, le=90)  # API upper bound
-    validation_days: int = Field(default=28, ge=7)
+    # Walk-forward test: 16 weekly origins (112 days); the model is re-fitted at every
+    # origin on data before it, exactly as the weekly retrain does in production.
+    validation_days: int = Field(default=112, ge=28)
+    early_stopping_days: int = Field(default=28, ge=7)
     backtest_step_days: int = Field(default=7, ge=1)
+    interval_low: float = Field(default=0.10, gt=0, lt=0.5)   # 80% forecast range
+    interval_high: float = Field(default=0.90, gt=0.5, lt=1)
     training_lookback_days: int | None = Field(default=None, ge=90)  # None = use all history
     holiday_country: str | None = "LK"  # python-holidays code; "" disables holiday features
     random_seed: int = 42
@@ -48,8 +53,16 @@ class Settings(BaseSettings):
     # --- Promotion gate -----------------------------------------------------
     # Candidate WAPE must beat the seasonal-naive baseline by at least this fraction...
     min_improvement_vs_baseline: float = Field(default=0.05, ge=0.0, lt=1.0)
-    # ...and must not be more than this fraction worse than production's recorded WAPE.
+    # ...and, on days neither model has seen, must not be more than this fraction worse
+    # than the live (champion) model...
     max_regression_vs_production: float = Field(default=0.10, ge=0.0)
+    min_champion_points: int = Field(default=30, ge=1)  # series-days needed for that comparison
+    # ...unless the champion is older than this: then a challenger that beats the baseline wins.
+    champion_max_age_days: int = Field(default=28, ge=7)
+
+    # --- Live monitoring -------------------------------------------------------
+    alert_ratio: float = Field(default=1.5, gt=1.0)       # live error > ratio x tested error -> alert
+    alert_min_days: int = Field(default=5, ge=1)
     max_wape: float | None = Field(default=None, gt=0)  # optional absolute ceiling
 
     # --- Serving ------------------------------------------------------------

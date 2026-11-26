@@ -38,20 +38,28 @@ def test_tampered_artifact_is_rejected(trained, tmp_path: Path) -> None:
         load_bundle(tmp_path / "nope.joblib")
 
 
+PROD = {"model_version": "p", "metrics": {"wape": 0.4}}
+
+
 @pytest.mark.parametrize(
-    ("wape", "base", "prod", "expected"),
+    ("wape", "base", "champion", "expected"),
     [
-        (0.50, 0.80, None, True),
-        (0.78, 0.80, None, False),               # not 5% better than baseline
-        (0.50, 0.80, 0.40, False),               # >10% worse than production
-        (0.43, 0.80, 0.40, True),                # within tolerance of production
+        (0.50, 0.80, None, True),                                      # no comparison possible -> baseline decides
+        (0.78, 0.80, None, False),                                     # not 5% better than baseline
         (float("nan"), 0.80, None, False),
+        (0.50, 0.80, {"points": 100, "challenger_wape": 0.50, "champion_wape": 0.40, "champion_age_days": 7}, False),
+        (0.50, 0.80, {"points": 100, "challenger_wape": 0.43, "champion_wape": 0.40, "champion_age_days": 7}, True),
+        (0.50, 0.80, {"points": 10, "challenger_wape": 0.90, "champion_wape": 0.40, "champion_age_days": 7}, True),
+        (0.50, 0.80, {"points": 100, "challenger_wape": 0.90, "champion_wape": 0.40, "champion_age_days": 35}, True),
     ],
 )
-def test_gate(wape: float, base: float, prod: float | None, expected: bool) -> None:
-    production = {"model_version": "p", "metrics": {"wape": prod}} if prod is not None else None
-    d = evaluate_gate(S, {"wape": wape}, {"wape": base}, production)
+def test_gate(wape: float, base: float, champion: dict | None, expected: bool) -> None:
+    d = evaluate_gate(S, {"wape": wape}, {"wape": base}, PROD, champion)
     assert isinstance(d, GateDecision) and d.promote is expected, d.reason
+
+
+def test_gate_without_production() -> None:
+    assert evaluate_gate(S, {"wape": 0.5}, {"wape": 0.8}, None).promote
 
 
 def test_max_wape_gate() -> None:
@@ -91,3 +99,41 @@ def test_weekly_metrics_uses_only_complete_weeks() -> None:
                          "y_true": 10.0, "y_pred": 12.0})
     m = weekly_metrics(pd.DataFrame(rows))
     assert m is not None and m["n"] == 1 and abs(m["wape"] - 0.2) < 1e-9
+
+
+def test_walk_forward_refits_only_on_past_data(
+    sample_csv: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import ml.train as train_mod
+    from ml.forecasting import weekly_origins
+
+    calls: list[pd.Timestamp] = []
+    real = train_mod.make_xy
+
+    def spy(features, cfg):
+        calls.append(features["sale_date"].max())
+        return real(features, cfg)
+
+    monkeypatch.setattr(train_mod, "make_xy", spy)
+    s = Settings(_env_file=None, data_source="csv", local_data_path=sample_csv, validation_days=56)
+    r = run_training(s, output_dir=tmp_path, upload=False)
+    origins = weekly_origins(s.cutoff_date(), 8)
+    assert r.metrics["test"]["origins"] == 8
+    assert origins[-1] == pd.Timestamp(s.cutoff_date()) - pd.Timedelta(days=6)
+    walk = calls[2:2 + len(origins)]           # after the train / early-stopping splits, before the final fit
+    assert all(last < o for last, o in zip(walk, origins, strict=True))
+    assert calls[-1] == pd.Timestamp(s.cutoff_date())  # shipped model uses everything up to yesterday
+
+
+def test_forecast_ranges_are_calibrated(trained) -> None:
+    iv = trained.metrics["intervals"]
+    assert 0.6 <= iv["coverage_d1_7"] <= 0.95
+    assert len(iv["combos"]) == 1 + 2 + 4 + 8      # all, per location, per category, per pair
+    q = iv["combos"]["*|*"]
+    for k in ("d1_7", "d8_14", "d7", "d14"):
+        assert q[k]["lo"] < q[k]["hi"]
+    from ml.intervals import apply_range
+
+    low, high = apply_range(1000.0, q["d7"])
+    assert 0 <= low < high
+    assert apply_range(1000.0, None) == (None, None)

@@ -260,6 +260,27 @@ create trigger trg_sales_forecasts_updated_at
   before update on public.sales_forecasts
   for each row execute function public.touch_updated_at();
 
+
+-- -----------------------------------------------------------------------------
+-- forecast_snapshots: a dated copy of every day's forecast (never overwritten by
+-- later days), so live accuracy can be measured by how far ahead it was made.
+-- -----------------------------------------------------------------------------
+create table if not exists public.forecast_snapshots (
+  issue_date       date           not null,   -- first forecast day (the day it was made for)
+  forecast_date    date           not null,
+  location         text           not null,
+  category         text           not null,
+  target_metric    text           not null check (target_metric in ('revenue', 'profit', 'units')),
+  horizon_days     integer        generated always as (forecast_date - issue_date + 1) stored,
+  predicted_value  numeric(14, 2) not null,
+  predicted_lower  numeric(14, 2),             -- 80% range
+  predicted_upper  numeric(14, 2),
+  model_version    text           not null references public.model_registry (model_version),
+  created_at       timestamptz    not null default now(),
+  primary key (issue_date, target_metric, location, category, forecast_date)
+);
+create index if not exists idx_forecast_snapshots_date on public.forecast_snapshots (target_metric, forecast_date);
+
 -- -----------------------------------------------------------------------------
 -- Views (security_invoker => the caller's RLS applies, not the view owner's)
 -- -----------------------------------------------------------------------------
@@ -286,6 +307,20 @@ select distinct on (target_metric, location, category, forecast_date)
 from public.sales_forecasts
 order by target_metric, location, category, forecast_date, generated_at desc;
 
+
+-- Issued forecasts next to what was actually sold (complete days only).
+create or replace view public.v_forecast_accuracy
+with (security_invoker = true) as
+select
+  s.issue_date, s.forecast_date, s.horizon_days, s.location, s.category, s.target_metric,
+  s.model_version, s.predicted_value, s.predicted_lower, s.predicted_upper,
+  coalesce(case s.target_metric when 'units' then d.units when 'profit' then d.profit else d.revenue end, 0)
+    ::numeric(14, 2) as actual_value
+from public.forecast_snapshots s
+left join public.v_daily_sales d
+  on d.sale_date = s.forecast_date and d.location = s.location and d.category = s.category
+where s.forecast_date < (now() at time zone 'Asia/Colombo')::date;   -- CUSTOMIZE: business time zone
+
 -- -----------------------------------------------------------------------------
 -- Row Level Security & grants
 -- -----------------------------------------------------------------------------
@@ -293,6 +328,7 @@ alter table public.sales_transactions enable row level security;
 alter table public.sync_seen_rows     enable row level security;
 alter table public.model_registry     enable row level security;
 alter table public.sales_forecasts    enable row level security;
+alter table public.forecast_snapshots enable row level security;
 
 -- No policies on sales_transactions / sync_seen_rows / model_registry:
 -- anon + authenticated get nothing; service_role bypasses RLS.
@@ -314,6 +350,9 @@ revoke all on public.sales_transactions, public.sync_seen_rows, public.model_reg
   from anon, authenticated;
 revoke insert, update, delete, truncate on public.sales_forecasts from anon, authenticated;
 revoke all on public.v_daily_sales from anon, authenticated;
+revoke all on public.forecast_snapshots, public.v_forecast_accuracy from anon, authenticated;
+grant all on public.forecast_snapshots to service_role;
+grant select on public.v_forecast_accuracy to service_role;
 revoke all on public.v_latest_forecasts from anon;
 grant select on public.sales_forecasts, public.v_latest_forecasts to authenticated;
 
@@ -354,6 +393,65 @@ as $$
   );
 $$;
 
+-- Live accuracy of issued forecasts (next-day and 7-day totals) + alert flag.
+-- Internal: called by dashboard_data (security definer); not exposed to API users.
+create or replace function public.live_accuracy(p_target text, p_window_days integer default 28)
+returns jsonb
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  with a as (
+    select * from v_forecast_accuracy where target_metric = p_target
+  ),
+  today as (select (now() at time zone 'Asia/Colombo')::date as d),
+  d1 as (
+    select a.* from a, today
+     where a.horizon_days = 1 and a.forecast_date >= today.d - p_window_days
+  ),
+  d1_7 as (select d1.* from d1, today where d1.forecast_date >= today.d - 7),
+  wk as (
+    select a.issue_date, a.location, a.category,
+           sum(a.predicted_value) as p, sum(a.actual_value) as t, count(*) as n
+      from a, today
+     where a.horizon_days between 1 and 7
+       and a.issue_date + 6 < today.d
+       and a.issue_date >= today.d - p_window_days - 6
+     group by 1, 2, 3
+    having count(*) = 7
+  ),
+  ref as (
+    select coalesce((metrics -> 'by_horizon' -> '1-7' ->> 'wape')::numeric, (metrics ->> 'wape')::numeric) as day_ref,
+           (metrics -> 'weekly' ->> 'wape')::numeric as week_ref
+      from model_registry where status = 'production' and target_metric = p_target
+     order by promoted_at desc nulls last limit 1
+  ),
+  s as (
+    select
+      (select count(distinct forecast_date) from d1)                                     as nd_days,
+      (select sum(abs(predicted_value - actual_value)) / nullif(sum(actual_value), 0) from d1)   as nd_wape,
+      (select count(distinct forecast_date) from d1_7)                                   as l7_days,
+      (select sum(abs(predicted_value - actual_value)) / nullif(sum(actual_value), 0) from d1_7) as l7_wape,
+      (select avg(case when actual_value between predicted_lower and predicted_upper then 1.0 else 0.0 end)
+         from d1 where predicted_lower is not null)                                      as coverage,
+      (select count(distinct issue_date) from wk)                                        as wk_weeks,
+      (select sum(abs(p - t)) / nullif(sum(t), 0) from wk)                               as wk_wape
+  )
+  select jsonb_build_object(
+    'next_day_days', s.nd_days, 'next_day_wape', round(s.nd_wape, 4),
+    'last7_days', s.l7_days, 'last7_wape', round(s.l7_wape, 4),
+    'range_coverage', round(s.coverage, 3),
+    'week_total_weeks', s.wk_weeks, 'week_total_wape', round(s.wk_wape, 4),
+    'tested_next_day_wape', (select day_ref from ref), 'tested_week_wape', (select week_ref from ref),
+    'alert', coalesce(
+      (s.l7_days >= 5 and s.l7_wape > greatest(1.5 * (select day_ref from ref), (select day_ref from ref) + 0.15))
+      or (s.wk_weeks >= 2 and s.wk_wape > greatest(1.5 * (select week_ref from ref), (select week_ref from ref) + 0.10)),
+      false)
+  )
+  from s;
+$$;
+
 -- v2 adds p_target ('revenue' | 'units'); drop the v1 signature so calls are unambiguous.
 drop function if exists public.dashboard_data(integer);
 
@@ -390,12 +488,14 @@ begin
     'available_targets', coalesce((
       select jsonb_agg(distinct target_metric) from model_registry where status = 'production'), '[]'::jsonb),
     'last_sync', (select max(updated_at) from sales_transactions),
+    'live', public.live_accuracy(v_target, 28),
     'latest_sale_date', (select max(sale_date) from sales_transactions where deleted_at is null),
     'model', (
       select jsonb_build_object(
         'model_version', model_version, 'trained_at', trained_at, 'promoted_at', promoted_at,
         'data_end', data_end, 'wape', metrics -> 'wape', 'baseline_wape', baseline_metrics -> 'wape',
-        'weekly_wape', metrics -> 'weekly' -> 'wape', 'weekly_baseline_wape', baseline_metrics -> 'weekly' -> 'wape')
+        'weekly_wape', metrics -> 'weekly' -> 'wape', 'weekly_baseline_wape', baseline_metrics -> 'weekly' -> 'wape',
+        'test', metrics -> 'test', 'intervals', metrics -> 'intervals')
         from model_registry where status = 'production' and target_metric = v_target
        order by promoted_at desc nulls last limit 1),
     'actuals', coalesce((
@@ -418,6 +518,7 @@ $$;
 revoke all on public.dashboard_viewers from anon, authenticated;
 revoke execute on function public.is_dashboard_viewer()          from public, anon;
 revoke execute on function public.dashboard_data(integer, text)  from public, anon;
+revoke execute on function public.live_accuracy(text, integer)    from public, anon, authenticated;
 grant  execute on function public.is_dashboard_viewer()          to authenticated;
 grant  execute on function public.dashboard_data(integer, text)  to authenticated;
 

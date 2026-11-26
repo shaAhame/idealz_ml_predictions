@@ -16,7 +16,7 @@ import re
 import sys
 
 
-def check_key(key: str) -> str | None:  # noqa: PLR0911
+def check_key(key: str) -> str | None:
     """Return an error message if `key` must not be published, else None."""
     if not key:
         return ("SUPABASE_PUBLISHABLE_KEY is empty. Add it as a repository SECRET under Settings > "

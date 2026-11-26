@@ -15,7 +15,8 @@ from ml.config import Settings, get_settings
 from ml.supabase_client import SupabaseClient
 from tests.fake_supabase import FakeSupabase
 
-PATCH_TARGETS = ["ml.supabase_client", "ml.train", "ml.predict_batch", "ml.registry", "ml.data_loader", "api.main"]
+PATCH_TARGETS = ["ml.supabase_client", "ml.train", "ml.predict_batch", "ml.registry", "ml.data_loader", "ml.monitor",
+                 "api.main"]
 
 
 @pytest.fixture
@@ -101,3 +102,62 @@ def test_batch_forecast_without_promoted_model_exits_3(fake: FakeSupabase, env: 
     get_settings.cache_clear()
     assert predict_batch.main(["--dry-run"]) == 3
     assert not fake.forecasts
+
+
+def test_champion_compared_on_unseen_days(fake: FakeSupabase, tmp_path: Path) -> None:
+    """Train a champion 14 days ago, then a challenger today: both are scored on the
+    two weeks after the champion's data_end, which neither was trained on."""
+    import datetime as dt
+
+    from ml import train
+
+    today = Settings(_env_file=None).today()
+    past = (today - dt.timedelta(days=14)).isoformat()
+    assert train.main(["--output-dir", str(tmp_path / "a"), "--as-of", past]) == 0
+    champ = next(iter(fake.registry.values()))
+    assert champ["status"] == "production"
+    assert train.main(["--output-dir", str(tmp_path / "b")]) == 0
+    new = next(r for r in fake.registry.values() if r["model_version"] != champ["model_version"])
+    cmp = new["metrics"]["champion_comparison"]
+    assert cmp["champion_version"] == champ["model_version"]
+    assert cmp["origins"] == 2 and cmp["points"] >= 100
+    assert 0 < cmp["champion_wape"] < 2 and 0 < cmp["challenger_wape"] < 2
+    assert "same unseen days" in new["decision_reason"] or "worse than" in new["decision_reason"]
+
+
+def test_snapshots_ranges_and_monitor(fake: FakeSupabase, tmp_path: Path, env: pytest.MonkeyPatch) -> None:
+    import datetime as dt
+
+    from ml import monitor, predict_batch, train
+
+    assert train.main(["--output-dir", str(tmp_path / "art")]) == 0
+    get_settings.cache_clear()
+    today = Settings(_env_file=None).today()
+    # issue forecasts on each of the last 10 days, as the nightly job would have
+    for k in range(10, 0, -1):
+        assert predict_batch.main(["--as-of", (today - dt.timedelta(days=k)).isoformat()]) == 0
+    assert predict_batch.main([]) == 0
+    snaps = list(fake.snapshots.values())
+    assert len(snaps) == 11 * 14 * 8
+    assert all(s["predicted_lower"] <= s["predicted_value"] <= s["predicted_upper"] for s in snaps)
+    assert predict_batch.main([]) == 0 and len(fake.snapshots) == 11 * 14 * 8   # idempotent
+
+    live = monitor.live_accuracy(pd.DataFrame(fake._accuracy_rows()), today)
+    assert live["next_day"]["days"] == 10 and live["week_totals"]["weeks"] >= 2
+    assert 0.3 <= live["next_day"]["range_coverage"] <= 1
+    assert monitor.main() == 0                                   # healthy
+
+    for s in fake.snapshots.values():                            # forecasts suddenly 5x too high
+        s["predicted_value"] *= 5
+    assert monitor.main() == 4                                   # alert -> red run
+
+
+def test_unmigrated_database_does_not_break_forecasts(fake: FakeSupabase, tmp_path: Path) -> None:
+    from ml import monitor, predict_batch, train
+
+    assert train.main(["--output-dir", str(tmp_path / "art")]) == 0
+    get_settings.cache_clear()
+    fake.snapshots_missing = True
+    assert predict_batch.main([]) == 0
+    assert len(fake.forecasts) == 8 * 14 and not fake.snapshots
+    assert monitor.main() == 0

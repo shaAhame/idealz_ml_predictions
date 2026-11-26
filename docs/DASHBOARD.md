@@ -51,8 +51,11 @@ To remove someone: `delete from public.dashboard_viewers where email = 'manager@
 ## What it shows
 
 - **Forecast next 7 / 14 days** and **actual last 7 days** (with change vs the week before).
-- **Forecast accuracy:** the model's typical daily error per category, and how much
-  better it is than "same as last week".
+- **Likely ranges:** every forecast has an 80% range (tiles, shaded band on the chart,
+  per shop & category, and per day), learned from 16 weeks of walk-forward testing.
+- **Forecast accuracy:** the tested error (daily and 7-day totals) and, as days pass,
+  the **live** error of forecasts actually issued, plus how often sales landed inside
+  the range. A warning appears if live accuracy is far worse than tested.
 - **Daily chart:** actual sales (solid) for 8 weeks, forecast (dashed) for the next
   14 days. As days pass, the dashed line also shows what was forecast for past days,
   so you can compare. Tap or hover for values.

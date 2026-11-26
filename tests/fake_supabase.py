@@ -25,6 +25,9 @@ class FakeSupabase:
         self.requests: list[httpx.Request] = []
         self.page_cap = page_cap  # emulates PostgREST max-rows
         self.fail_next: list[int] = []
+        self.snapshots: dict[tuple[str, ...], dict[str, Any]] = {}
+        self.snapshots_missing = False  # emulate a database without the new table
+        self.today: str | None = None   # v_forecast_accuracy shows only days before this
 
     # ------------------------------------------------------------------
     def transport(self) -> httpx.MockTransport:
@@ -66,6 +69,17 @@ class FakeSupabase:
                     r["status"] = "archived"
             self.registry[v].update(status="production", promoted_at=pd.Timestamp.now(tz="UTC").isoformat())
             return httpx.Response(204)
+        if path == "/rest/v1/forecast_snapshots" and request.method == "POST":
+            if self.snapshots_missing:
+                return httpx.Response(404, json={"code": "PGRST205", "message": "Could not find the table"})
+            conflict = dict(params)["on_conflict"].split(",")
+            for row in json.loads(request.content):
+                self.snapshots[tuple(str(row[c]) for c in conflict)] = row
+            return httpx.Response(201)
+        if path == "/rest/v1/v_forecast_accuracy" and request.method == "GET":
+            if self.snapshots_missing:
+                return httpx.Response(404, json={"code": "PGRST205", "message": "Could not find the table"})
+            return self._select(self._accuracy_rows(), params)
         if path == "/rest/v1/sales_forecasts" and request.method == "POST":
             assert "merge-duplicates" in request.headers["prefer"]
             conflict = dict(params)["on_conflict"].split(",")
@@ -73,6 +87,18 @@ class FakeSupabase:
                 self.forecasts[tuple(str(row[c]) for c in conflict)] = row
             return httpx.Response(201)
         return httpx.Response(404, json={"message": f"no route {request.method} {path}"})
+
+    def _accuracy_rows(self) -> list[dict[str, Any]]:
+        actual = {(d["sale_date"], d["location"], d["category"]): d for d in self.daily}
+        today = self.today or pd.Timestamp.now(tz="Asia/Colombo").date().isoformat()
+        out = []
+        for r in self.snapshots.values():
+            if r["forecast_date"] >= today:
+                continue
+            a = actual.get((r["forecast_date"], r["location"], r["category"]), {})
+            horizon = (pd.Timestamp(r["forecast_date"]) - pd.Timestamp(r["issue_date"])).days + 1
+            out.append({**r, "horizon_days": horizon, "actual_value": float(a.get(r["target_metric"], 0.0))})
+        return out
 
     # ------------------------------------------------------------------
     def _select(self, rows: list[dict[str, Any]], params: list[tuple[str, str]]) -> httpx.Response:

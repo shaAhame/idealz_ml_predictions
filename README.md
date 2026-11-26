@@ -134,18 +134,26 @@ Follow **[docs/VERIFICATION.md](docs/VERIFICATION.md)**.
 - **Model:** one global LightGBM model across all series, with a Tweedie objective
   for zero-inflated, skewed sales. The category levels seen in training are frozen in
   the pipeline.
-- **Validation:** strictly time-based. Early stopping uses the 28 days before the
-  holdout. The last 28 days are a **rolling-origin backtest**: every 7 days it
-  forecasts 14 days ahead recursively, using only data before that origin, which is
-  exactly what production does. A **seasonal-naive** baseline (repeat last week) is
-  scored on the same points.
+- **Validation:** strictly time-based **walk-forward test over the last 16 weeks**:
+  at every weekly origin the model is re-fitted on all data before it and forecasts
+  14 days ahead recursively, exactly what the weekly retrain does. Early stopping uses
+  the 28 days before the first origin. A **seasonal-naive** baseline (repeat last
+  week) is scored on the same points.
+- **Forecast ranges:** 80% ranges from the walk-forward errors (log-ratio quantiles
+  per filter combination, for single days and for 7- and 14-day totals).
+- **Live tracking:** every night's forecast is kept as a dated snapshot
+  (`forecast_snapshots`); `ml/monitor.py` compares issued forecasts with actual
+  sales daily and fails the run (red, e-mail) if live error is far above the tested
+  error.
 - **Metrics:** MAE, RMSE, MAPE (over non-zero days; the share of excluded zero
   days is reported), **WAPE** (used for decisions) and bias, overall and by horizon
   week and category. They are written to `metadata.json`, `model_registry` and the
   GitHub job summary.
 - **Promotion gate:** WAPE must beat the baseline by ≥ `MIN_IMPROVEMENT_VS_BASELINE`
-  (5%) and must not be more than `MAX_REGRESSION_VS_PRODUCTION` (10%) worse than
-  production's recorded WAPE. An optional `MAX_WAPE` adds a hard ceiling.
+  (5%) on the same 16 weeks, and, on the days after the live model's data_end (unseen
+  by both), must not be more than `MAX_REGRESSION_VS_PRODUCTION` (10%) worse than the
+  live model, unless the live model is older than `CHAMPION_MAX_AGE_DAYS` (28).
+  An optional `MAX_WAPE` adds a hard ceiling.
   Rejected models are still uploaded and registered with `status='rejected'` for audit.
 - **Shipping:** after the gate, the model is refit on all data. The bundle
   (`model.joblib` = pipeline + feature config + column order + metadata) goes to the

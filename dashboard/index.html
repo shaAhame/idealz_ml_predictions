@@ -88,6 +88,8 @@
   .tooltip .key { display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); }
   .sw { width: 14px; height: 0; border-top: 2px solid; display: inline-block; }
   .sw.dash { border-top-style: dashed; }
+  .band-sw { width: 14px; height: 10px; display: inline-block; border-radius: 2px; background: var(--series-2); opacity: .22; }
+  .range { display: block; font-size: 11.5px; color: var(--text-muted); white-space: nowrap; }
   .bars .bar-row { display: grid; grid-template-columns: minmax(96px, 42%) 1fr auto; align-items: center; gap: 8px; padding: 6px 0; }
   .bars .bar-name { font-size: 13px; line-height: 1.25; color: var(--text-secondary); overflow-wrap: anywhere; }
   .bars .bar-track { height: 14px; }
@@ -174,6 +176,7 @@
       <div class="legend" aria-hidden="true">
         <span><i class="sw" style="border-color:var(--series-1)"></i>Actual</span>
         <span><i class="sw dash" style="border-color:var(--series-2)"></i>Forecast</span>
+        <span id="legend-range"><i class="band-sw"></i>80% likely range</span>
       </div>
     </div>
     <div class="chart" id="trend"><div class="skeleton"></div></div>
@@ -187,9 +190,9 @@
 
   <div class="card section" id="table-card">
     <h2>Day by day</h2>
-    <div class="sub">Forecast for each day, next to the same weekday last week</div>
+    <div class="sub">Forecast for each day with its 80% likely range, next to the same weekday last week</div>
     <div style="overflow-x:auto"><table id="daily-table"><thead><tr>
-      <th scope="col">Day</th><th scope="col">Forecast</th><th scope="col">Same day last week</th>
+      <th scope="col">Day</th><th scope="col">Forecast</th><th scope="col">Likely range</th><th scope="col">Same day last week</th>
     </tr></thead><tbody></tbody></table></div>
   </div>
 
@@ -287,6 +290,30 @@
   };
   const fmtC = (v) => (v == null || !isFinite(v) ? "—" : (isUnits() ? nfc.format(v) : "Rs " + nfc.format(v)));
   const fmtKpi = (v) => (v == null || !isFinite(v) ? "—" : (isUnits() ? `~${nf0.format(Math.round(v))} items` : fmtC(v)));
+
+  // 80% likely ranges from the model's walk-forward test (log-ratio quantiles per filter combination)
+  const comboKey = () => `${filters.location || "*"}|${filters.category || "*"}`;
+  function rangeOf(point, kind) {
+    const iv = DATA && DATA.model && DATA.model.intervals;
+    const q = iv && iv.combos && iv.combos[comboKey()] && iv.combos[comboKey()][kind];
+    if (!q || point == null || !isFinite(point)) return null;
+    const b = Math.log1p(Math.max(point, 0));
+    return [Math.max(0, Math.expm1(b + q.lo)), Math.max(0, Math.expm1(b + q.hi))];
+  }
+  function rangeOfKey(point, key, kind) {
+    const iv = DATA && DATA.model && DATA.model.intervals;
+    const q = iv && iv.combos && iv.combos[key] && iv.combos[key][kind];
+    if (!q || point == null || !isFinite(point)) return null;
+    const b = Math.log1p(Math.max(point, 0));
+    return [Math.max(0, Math.expm1(b + q.lo)), Math.max(0, Math.expm1(b + q.hi))];
+  }
+  const dayKind = (d, today) => ((parse(d) - parse(today)) / DAY < 7 ? "d1_7" : "d8_14");
+  const fmtRange = (r, compact) => {
+    if (!r) return "";
+    if (isUnits()) return `${nf0.format(Math.floor(r[0]))}–${nf0.format(Math.ceil(r[1]))} items`;
+    const f = compact ? (v) => fmtC(v).replace("Rs ", "") : (v) => fmt(v).replace("Rs ", "");
+    return `Rs ${f(r[0])} – ${f(r[1])}`;
+  };
   const DAY = 86400000;
   const iso = (d) => d.toISOString().slice(0, 10);
   const parse = (s) => new Date(s + "T00:00:00Z");
@@ -364,8 +391,11 @@
     const next14 = sumRange(fc, today, addDays(today, 13));
     const last7 = sumRange(act, addDays(today, -7), addDays(today, -1)) || 0;
     const prev7 = sumRange(act, addDays(today, -14), addDays(today, -8)) || 0;
-    setKpi("kpi-next7", fmtKpi(next7), next7 == null ? "No forecast yet" : `${shortDate(today)} – ${shortDate(addDays(today, 6))}`);
-    setKpi("kpi-next14", fmtKpi(next14), next14 == null ? "No forecast yet" : `through ${shortDate(addDays(today, 13))}`);
+    const r7 = rangeOf(next7, "d7"), r14 = rangeOf(next14, "d14");
+    setKpi("kpi-next7", fmtKpi(next7), next7 == null ? "No forecast yet"
+      : `${shortDate(today)} – ${shortDate(addDays(today, 6))}${r7 ? ` · likely ${fmtRange(r7, true)}` : ""}`);
+    setKpi("kpi-next14", fmtKpi(next14), next14 == null ? "No forecast yet"
+      : `through ${shortDate(addDays(today, 13))}${r14 ? ` · likely ${fmtRange(r14, true)}` : ""}`);
     let note = "vs previous 7 days: no data";
     if (prev7 > 0) {
       const ch = (last7 - prev7) / prev7;
@@ -375,10 +405,19 @@
     const m = DATA.model;
     if (m && m.wape != null) {
       const w = Number(m.wape), b = Number(m.baseline_wape), ww = Number(m.weekly_wape);
+      const weeks = m.test && m.test.origins ? `${m.test.origins} test weeks` : "test period";
       const parts = [];
-      if (isFinite(ww)) parts.push(`7-day totals: ±${Math.round(ww * 100)}%`);
+      if (isFinite(ww)) parts.push(`7-day totals ±${Math.round(ww * 100)}%`);
       if (isFinite(b) && b > 0) parts.push(`${Math.round((1 - w / b) * 100)}% better than "same as last week"`);
-      setKpi("kpi-accuracy", `±${Math.round(w * 100)}% daily`, `Typical error per shop & category. ${parts.join(" · ")}`);
+      const L = DATA.live || {};
+      let live = "Live check: builds up over the next days.";
+      if (L.next_day_days >= 3 && L.next_day_wape != null) {
+        live = `Live, last ${L.next_day_days} days: next-day ±${Math.round(L.next_day_wape * 100)}%`;
+        if (L.week_total_weeks >= 1 && L.week_total_wape != null) live += `, 7-day totals ±${Math.round(L.week_total_wape * 100)}%`;
+        if (L.range_coverage != null) live += `, ${Math.round(L.range_coverage * 100)}% inside the likely range`;
+        live += ".";
+      }
+      setKpi("kpi-accuracy", `±${Math.round(w * 100)}% daily`, `Tested on ${weeks}: ${parts.join(" · ")}. ${live}`);
     } else {
       setKpi("kpi-accuracy", "—", isUnits() ? "No items-sold model yet: it appears after the next training run" : "No production model yet");
     }
@@ -389,6 +428,12 @@
     if (DATA.latest_sale_date) parts.push(`latest sale ${shortDate(DATA.latest_sale_date)}`);
     const line = $("status-line");
     line.replaceChildren(document.createTextNode(parts.join(" · ")));
+    if (DATA.live && DATA.live.alert) {
+      const b = el("span", { class: "badge", role: "status" });
+      b.append(el("span", { class: "dot", "aria-hidden": "true" }),
+               document.createTextNode("⚠ Forecasts have been much less accurate than tested recently. Use with care"));
+      line.append(document.createElement("br"), b);
+    }
     const stale = DATA.latest_sale_date && (parse(DATA.today) - parse(DATA.latest_sale_date)) / DAY > 3;
     if (stale) {
       const b = el("span", { class: "badge", role: "status" });
@@ -407,17 +452,22 @@
     const dates = [];
     for (let d = start; d <= end; d = addDays(d, 1)) dates.push(d);
     const firstActual = [...act.keys()].sort()[0];
-    const pts = dates.map((d) => ({
-      d,
-      a: d < today && firstActual && d >= firstActual ? act.get(d) || 0 : null,  // missing day = no sales
-      f: fc.has(d) ? fc.get(d) : null,
-    }));
+    const pts = dates.map((d) => {
+      const f = fc.has(d) ? fc.get(d) : null;
+      return {
+        d,
+        a: d < today && firstActual && d >= firstActual ? act.get(d) || 0 : null,  // missing day = no sales
+        f,
+        r: f != null && d >= today ? rangeOf(f, dayKind(d, today)) : null,
+      };
+    });
+    $("legend-range").hidden = !pts.some((p) => p.r);
     if (!pts.some((p) => p.a != null || p.f != null)) { box.append(el("div", { class: "empty" }, "No data for this selection.")); return; }
 
     const W = Math.max(300, box.clientWidth), H = W < 520 ? 230 : 280;
     const m = { t: 12, r: 12, b: 26, l: 52 };
     const iw = W - m.l - m.r, ih = H - m.t - m.b;
-    const ymax = Math.max(1, ...pts.map((p) => Math.max(p.a || 0, p.f || 0))) * 1.08;
+    const ymax = Math.max(1, ...pts.map((p) => Math.max(p.a || 0, p.f || 0, p.r ? p.r[1] : 0))) * 1.08;
     const x = (i) => m.l + (dates.length === 1 ? iw / 2 : (i / (dates.length - 1)) * iw);
     const y = (v) => m.t + ih - (v / ymax) * ih;
 
@@ -446,6 +496,12 @@
       pts.forEach((p, i) => { if (p[key] == null) { on = false; return; } dstr += `${on ? "L" : "M"}${x(i).toFixed(1)},${y(p[key]).toFixed(1)}`; on = true; });
       return dstr;
     };
+    const banded = pts.map((p, i) => [p, i]).filter(([p]) => p.r);
+    if (banded.length > 1) {
+      const up = banded.map(([p, i]) => `${x(i).toFixed(1)},${y(p.r[1]).toFixed(1)}`);
+      const lo = banded.slice().reverse().map(([p, i]) => `${x(i).toFixed(1)},${y(p.r[0]).toFixed(1)}`);
+      s.append(svg("path", { d: `M${up.join("L")}L${lo.join("L")}Z`, fill: "var(--series-2)", "fill-opacity": 0.16, stroke: "none" }));
+    }
     s.append(svg("path", { d: path("a"), fill: "none", stroke: "var(--series-1)", "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }));
     s.append(svg("path", { d: path("f"), fill: "none", stroke: "var(--series-2)", "stroke-width": 2, "stroke-dasharray": "5 4", "stroke-linejoin": "round" }));
 
@@ -478,6 +534,7 @@
       };
       if (p.a != null) row("Actual", "", "var(--series-1)", p.a);
       if (p.f != null) row("Forecast", "dash", "var(--series-2)", p.f);
+      if (p.r) { const rr = el("div", { class: "row" }); rr.append(el("span", { class: "key" }, "Likely range"), el("span", null, fmtRange(p.r, true))); tip.append(rr); }
       if (p.a == null && p.f == null) tip.append(el("div", { class: "muted" }, "No data"));
       tip.hidden = false;
       const bw = box.clientWidth, tw = tip.offsetWidth;
@@ -507,7 +564,13 @@
     $("split-title").textContent = filters.category ? "Next 7 days by location" : "Next 7 days by shop & category";
     $("split-sub").textContent = isUnits() ? "Forecast items sold in each group (for stock ordering)" : "Forecast total for each group";
     const g = new Map();
-    for (const r of DATA.forecasts) if (keep(r) && r.d >= today && r.d <= to) g.set(groupOf(r), (g.get(groupOf(r)) || 0) + Number(r.value));
+    const groupRange = {};  // group name -> interval combo key
+    for (const r of DATA.forecasts) {
+      if (!(keep(r) && r.d >= today && r.d <= to)) continue;
+      g.set(groupOf(r), (g.get(groupOf(r)) || 0) + Number(r.value));
+      groupRange[groupOf(r)] = filters.category ? `${r.location}|${filters.category}`
+        : (multiLoc ? `${r.location}|${r.category}` : `${filters.location || "*"}|${r.category}`);
+    }
     const rows = [...g.entries()].sort((a, b) => b[1] - a[1]);
     if (!rows.length) { box.append(el("div", { class: "empty" }, "No forecast for the next 7 days yet.")); return; }
     const max = rows[0][1] || 1;
@@ -517,8 +580,10 @@
       const fill = el("div", { class: "bar-fill", title: `${name}: ${fmt(v)}` });
       fill.style.width = `${Math.max(0.5, (v / max) * 100)}%`;
       track.append(fill);
-      row.append(el("div", { class: "bar-name", title: name }, name), track,
-                 el("div", { class: "bar-val" }, isUnits() ? `~${nf0.format(Math.round(v))}` : fmtC(v)));
+      const val = el("div", { class: "bar-val" }, isUnits() ? `~${nf0.format(Math.round(v))}` : fmtC(v));
+      const rg = groupRange[name] ? rangeOfKey(v, groupRange[name], "d7") : null;
+      if (rg) val.append(el("span", { class: "range" }, fmtRange(rg, true)));
+      row.append(el("div", { class: "bar-name", title: name }, name), track, val);
       box.append(row);
     }
   }
@@ -528,11 +593,12 @@
     const tb = $("daily-table").querySelector("tbody");
     tb.replaceChildren();
     const days = [...fc.keys()].filter((d) => d >= today).sort();
-    if (!days.length) { const tr = el("tr"); const td = el("td", { colspan: 3, class: "empty" }, "No forecast yet."); tr.append(td); tb.append(tr); return; }
+    if (!days.length) { const tr = el("tr"); const td = el("td", { colspan: 4, class: "empty" }, "No forecast yet."); tr.append(td); tb.append(tr); return; }
     for (const d of days) {
       const tr = el("tr", { class: isWeekend(d) ? "weekend" : "" });
       const lw = addDays(d, -7);
       tr.append(el("td", null, longDate(d) + (d === today ? " · today" : "")), el("td", null, fmt(fc.get(d))),
+                el("td", { class: "muted" }, fmtRange(rangeOf(fc.get(d), dayKind(d, today)), true) || "—"),
                 el("td", { class: "muted" }, lw < today ? fmt(act.get(lw) || 0) : "—"));
       tb.append(tr);
     }

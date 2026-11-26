@@ -100,3 +100,35 @@ def rolling_origin_backtest(
         results.append(merged.assign(origin=origin))
         origin += pd.Timedelta(days=step_days)
     return pd.concat(results, ignore_index=True)
+
+
+def weekly_origins(cutoff: dt.date | pd.Timestamp, n_weeks: int) -> list[pd.Timestamp]:
+    """Origins every 7 days, aligned so the LAST origin is cutoff - 6: every window
+    then has at least 7 days of actuals, and a model retrained weekly has its data_end
+    exactly one day before an origin (needed for the same-window champion check)."""
+    end = pd.Timestamp(cutoff) + pd.Timedelta(days=1)
+    return [end - pd.Timedelta(days=7 * k) for k in range(n_weeks, 0, -1)]
+
+
+def backtest_at_origins(
+    panel: pd.DataFrame,
+    forecast_fn: ForecastFn,
+    origins: list[pd.Timestamp],
+    eval_end: dt.date | pd.Timestamp,
+    horizon: int,
+) -> pd.DataFrame:
+    """Like rolling_origin_backtest but for an explicit list of origins."""
+    eval_end = pd.Timestamp(eval_end)
+    results: list[pd.DataFrame] = []
+    for origin in origins:
+        history = panel.loc[panel["sale_date"] < origin]
+        h = min(horizon, int((eval_end - origin).days) + 1)
+        if h < 1 or history.empty:
+            continue
+        fc = forecast_fn(history, origin, h)
+        actual = panel.loc[(panel["sale_date"] >= origin) & (panel["sale_date"] <= origin + pd.Timedelta(days=h - 1))]
+        merged = fc.merge(actual.rename(columns={"y": "y_true"}), on=["sale_date", *SERIES_KEYS], how="inner")
+        results.append(merged.assign(origin=origin))
+    if not results:
+        return pd.DataFrame(columns=["sale_date", *SERIES_KEYS, "step", "y_pred", "y_true", "origin"])
+    return pd.concat(results, ignore_index=True)
